@@ -4,7 +4,8 @@
 //! `sensors analyze` once.
 //!
 //! Pages are built on the server with maud and use plain HTML forms, so
-//! everything works without JavaScript. A form posts to an action, which
+//! everything works without JavaScript. The only script is `chart.js`, which
+//! adds hover tooltips to the charts. A form posts to an action, which
 //! redirects back to a page, so reloading a page never repeats an action.
 //! Each request opens the database on a blocking thread, since SQLite calls
 //! block.
@@ -12,9 +13,11 @@
 //! The server comes from wot's `wot review`.
 
 mod analyze;
+mod chart;
 mod history;
 mod layout;
 mod pages;
+mod sensors;
 
 use std::fmt::Display;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -32,6 +35,7 @@ use serde::Deserialize;
 use crate::db;
 
 const STYLE: &str = include_str!("style.css");
+const CHART_SCRIPT: &str = include_str!("chart.js");
 
 #[derive(Clone)]
 struct App {
@@ -55,9 +59,11 @@ pub fn run(db_path: &Path, port: u16) -> db::Result<()> {
     };
     let router = Router::new()
         .merge(pages::routes())
+        .merge(sensors::routes())
         .merge(history::routes())
         .merge(analyze::routes())
         .route("/style.css", get(style))
+        .route("/chart.js", get(chart_script))
         .fallback(not_found)
         .with_state(app);
 
@@ -152,6 +158,13 @@ fn filled(value: &Option<String>) -> Option<&str> {
 
 async fn style() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE)
+}
+
+async fn chart_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        CHART_SCRIPT,
+    )
 }
 
 async fn not_found() -> PageError {

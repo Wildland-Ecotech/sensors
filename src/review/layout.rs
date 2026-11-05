@@ -28,12 +28,14 @@ fn frame(title: &str, flash: &Flash, body: Markup, reload: Option<u32>) -> Marku
                 }
                 title { (title) " · sensors review" }
                 link rel="stylesheet" href="/style.css";
+                script src="/chart.js" defer {}
             }
             body {
                 header {
                     nav {
                         a.brand href="/" { "sensors review" }
                         a href="/" { "Overview" }
+                        a href="/sensors" { "Sensors" }
                         a href="/history" { "History" }
                         a href="/analyze" { "Analyze" }
                     }

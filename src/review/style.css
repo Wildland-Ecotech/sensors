@@ -12,6 +12,15 @@
     --notice-background: #e5f4ef;
     --error-background: #fbe9e7;
     --danger: #b3261e;
+    /* Sensor colors, in order, checked for color blindness and contrast. */
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
+    --series-5: #e87ba4;
+    --series-6: #008300;
+    --series-7: #6250d6;
+    --series-8: #e34948;
     color-scheme: light dark;
 }
 
@@ -27,6 +36,14 @@
         --notice-background: #18332c;
         --error-background: #3b1d1a;
         --danger: #f28b82;
+        --series-1: #3987e5;
+        --series-2: #d95926;
+        --series-3: #199e70;
+        --series-4: #c98500;
+        --series-5: #d55181;
+        --series-6: #008300;
+        --series-7: #9085e9;
+        --series-8: #e66767;
     }
 }
 
@@ -265,4 +282,198 @@ summary {
 /* JSON lines are long; they wrap anywhere rather than widen the table. */
 table.lines td.wrap {
     overflow-wrap: anywhere;
+}
+
+/* Charts of readings. Each sensor's slot sets its color. */
+.s0 { --series: var(--muted); }
+.s1 { --series: var(--series-1); }
+.s2 { --series: var(--series-2); }
+.s3 { --series: var(--series-3); }
+.s4 { --series: var(--series-4); }
+.s5 { --series: var(--series-5); }
+.s6 { --series: var(--series-6); }
+.s7 { --series: var(--series-7); }
+.s8 { --series: var(--series-8); }
+
+/* The range links and the channel menu, in one row above the charts. */
+.filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    align-items: center;
+    margin: 0.5rem 0 1rem;
+}
+
+.ranges {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.ranges a {
+    padding: 0.3rem 0.8rem;
+    text-decoration: none;
+    border-left: 1px solid var(--border);
+}
+
+.ranges a:first-child {
+    border-left: none;
+}
+
+.ranges a[aria-current="page"] {
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 600;
+}
+
+figure.chart {
+    margin: 0.5rem 0 1rem;
+}
+
+.chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.25rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+}
+
+.legend-item {
+    display: inline-flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+/* A short stroke of a sensor's color, beside its name. */
+.line-key {
+    display: inline-block;
+    width: 1rem;
+    height: 2px;
+    border-radius: 1px;
+    vertical-align: middle;
+    background: var(--series);
+}
+
+/* The plot with the values beside it and the times below, which are HTML so
+   they stay legible however wide the chart is. */
+.chart-body {
+    /* The tooltip's offsets are measured from here. */
+    position: relative;
+    display: grid;
+    grid-template-columns: 3rem 1fr;
+    grid-template-rows: 14rem 1.75rem;
+}
+
+.y-axis,
+.x-axis {
+    position: relative;
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.y-axis span {
+    position: absolute;
+    right: 0.5rem;
+    transform: translateY(-50%);
+}
+
+.x-axis {
+    grid-column: 2;
+}
+
+.x-axis span {
+    position: absolute;
+    top: 0.3rem;
+    transform: translateX(-50%);
+    white-space: nowrap;
+}
+
+.plot {
+    position: relative;
+}
+
+.plot:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: 2px;
+}
+
+.plot svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.plot .grid {
+    stroke: var(--border);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+}
+
+.plot .line {
+    fill: none;
+    stroke: var(--series);
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.plot .band {
+    fill: var(--series);
+    fill-opacity: 0.12;
+    stroke: none;
+}
+
+/* Added by chart.js: a hairline at the nearest point, and every sensor's
+   value there. */
+.crosshair {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--muted);
+    pointer-events: none;
+}
+
+.chart-tooltip {
+    position: absolute;
+    top: 0.5rem;
+    z-index: 1;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    font-size: 0.85rem;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.tooltip-time {
+    color: var(--muted);
+    margin-bottom: 0.2rem;
+}
+
+.tooltip-row {
+    display: flex;
+    gap: 0.45rem;
+    align-items: center;
+}
+
+table.summary {
+    margin-bottom: 0.5rem;
+}
+
+/* On a phone, every other time below a chart, so they never overlap. */
+@media (max-width: 40rem) {
+    .x-axis span:nth-child(even) {
+        display: none;
+    }
+
+    .chart-body {
+        grid-template-columns: 2.5rem 1fr;
+    }
 }

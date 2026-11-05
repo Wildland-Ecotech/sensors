@@ -18,8 +18,9 @@ your computer can open.
 ## Status
 
 Early development. It imports irssi logs into the database, reads the
-sensor readings in them, and shows each sensor's latest readings and the
-raw log lines by day in a web interface. Next are graphs of the readings.
+sensor readings in them, and shows them in a web interface: charts of each
+measure over a day, week, month, year or everything, with CSV downloads, and
+the raw log lines by day.
 
 ## Install
 
@@ -68,7 +69,8 @@ lines later, so the command line is only needed for the first import.
   channels to process, and how importing works.
 - [Readings](docs/readings.md): which JSON lines are readings, markers, time
   zones and rebuilding.
-- [Reviewing in a browser](docs/review.md): the pages of `sensors review`.
+- [Reviewing in a browser](docs/review.md): the pages of `sensors review`,
+  and how the graphs and downloads work.
 - [Database](docs/database.md): the tables, for querying them or working on
   `sensors`.
 

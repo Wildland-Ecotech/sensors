@@ -2,6 +2,7 @@ mod analysis;
 mod channels;
 mod db;
 mod discover;
+mod graphs;
 mod history;
 mod irssi;
 mod progress;
