@@ -1,9 +1,12 @@
+mod analysis;
 mod db;
 mod discover;
 mod irssi;
 mod progress;
 mod readings;
 mod report;
+mod review;
+mod stats;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -44,11 +47,24 @@ enum Command {
         #[arg(long)]
         rebuild: bool,
     },
+
+    /// Review the readings and log lines in a web browser, on this computer
+    /// only
+    Review {
+        /// Port to serve on, at http://127.0.0.1:PORT/
+        #[arg(long, default_value_t = 7172)]
+        port: u16,
+
+        /// SQLite database to review
+        #[arg(long, value_name = "FILE", default_value = DEFAULT_DB)]
+        db: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Analyze { roots, db, rebuild } => finish(analyze(&roots, &db, rebuild)),
+        Command::Review { port, db } => finish(review::run(&db, port)),
     }
 }
 
@@ -71,35 +87,11 @@ fn open(db_path: &Path) -> db::Result<Connection> {
 /// readings in them, and lists the series. A replaced file, or `rebuild`,
 /// reads the readings from every line again.
 fn analyze(roots: &[PathBuf], db_path: &Path, rebuild: bool) -> db::Result<()> {
-    let mut progress = Progress::to_stderr();
-    let folders: Vec<String> = roots
-        .iter()
-        .map(|root| root.display().to_string())
-        .collect();
-    progress.note(&format!("Looking for log files in {}", folders.join(", ")));
-    let inventory = discover::discover(roots)?;
-    progress.note(&format!(
-        "Found {} log files, {} in all",
-        report::thousands(inventory.files.len() as u64),
-        progress::bytes(inventory.files.iter().map(|file| file.bytes).sum())
-    ));
-    for skipped in &inventory.skipped {
-        progress.note(&format!(
-            "Skipped {}: {}",
-            skipped.path.display(),
-            skipped.reason
-        ));
-    }
-
     let mut conn = open(db_path)?;
-    let summary = db::import_with_progress(&mut conn, &inventory.files, &mut progress);
-    // Files that could not be read are listed in the summary, and the rest
-    // are still imported.
-    report::import_summary(&mut io::stderr().lock(), db_path, &summary)?;
-
-    let full = rebuild || summary.replaced_files > 0;
-    let built = readings::build_with_progress(&mut conn, full, &mut progress)?;
-    report::build_summary(&mut io::stderr().lock(), &built)?;
+    let mut progress = Progress::to_stderr();
+    let outcome = analysis::run(&mut conn, roots, rebuild, &mut progress)?;
+    report::import_summary(&mut io::stderr().lock(), db_path, &outcome.import)?;
+    report::build_summary(&mut io::stderr().lock(), &outcome.build)?;
     eprintln!();
 
     let series = readings::series(&conn)?;

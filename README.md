@@ -12,13 +12,14 @@ reading from each of its sensors to `#greenhouse` every thirty seconds:
 ```
 
 Everything runs on your own computer. The logs go into a local SQLite
-database.
+database, and `sensors review` serves a web interface for them that only
+your computer can open.
 
 ## Status
 
 Early development. It imports irssi logs into the database, reads the
-sensor readings in them, and lists each sensor's measures. Next is a web
-interface with graphs of them.
+sensor readings in them, and shows each sensor's latest readings in a web
+interface. Next are the raw lines by day, then graphs of the readings.
 
 ## Install
 
@@ -50,19 +51,30 @@ Channel      Nick        Sensor   Measure  Readings  From and to
 #greenhouse  greenhouse  inside   temp        2,864  2026-11-03 13:46 to 2026-11-04 18:06
 ```
 
+Then review them in your browser:
+
+```bash
+sensors review
+```
+
+Open <http://127.0.0.1:7172/>. **Analyze now** on the Overview reads new
+lines later, so the command line is only needed for the first import.
+
 ## Documentation
 
 - [Logs and importing](docs/logs.md): the log layout `sensors` expects and
   how importing works.
 - [Readings](docs/readings.md): which JSON lines are readings, markers, time
   zones and rebuilding.
+- [Reviewing in a browser](docs/review.md): the pages of `sensors review`.
 - [Database](docs/database.md): the tables, for querying them or working on
   `sensors`.
 
 ## Credits
 
-The log importer comes from [wot](https://github.com/wetfish/web-of-trust),
-the web of trust tools for IRC communities by Wetfish.
+The log importer and the review server come from
+[wot](https://github.com/wetfish/web-of-trust), the web of trust tools for
+IRC communities by Wetfish.
 
 ## License
 

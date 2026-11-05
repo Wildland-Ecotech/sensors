@@ -454,6 +454,8 @@ pub struct Series {
     /// The first and last reading's time, in milliseconds since 1970 UTC.
     pub first: Option<i64>,
     pub last: Option<i64>,
+    /// The last reading's value.
+    pub latest: Option<f64>,
 }
 
 /// Every series, by channel, nick, sensor and measure.
@@ -462,7 +464,8 @@ pub fn series(conn: &Connection) -> Result<Vec<Series>> {
         "SELECT s.channel, s.nick, s.sensor, s.measure,
                 (SELECT ifnull(sum(readings), 0) FROM reading_hours h WHERE h.series_id = s.id),
                 (SELECT min(at) FROM readings r WHERE r.series_id = s.id),
-                (SELECT max(at) FROM readings r WHERE r.series_id = s.id)
+                (SELECT max(at) FROM readings r WHERE r.series_id = s.id),
+                (SELECT value FROM readings r WHERE r.series_id = s.id ORDER BY at DESC LIMIT 1)
          FROM sensor_series s
          ORDER BY s.channel, s.nick, s.sensor, s.measure, s.tag",
     )?;
@@ -476,6 +479,7 @@ pub fn series(conn: &Connection) -> Result<Vec<Series>> {
                 readings: row.get(4)?,
                 first: row.get(5)?,
                 last: row.get(6)?,
+                latest: row.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -673,6 +677,7 @@ mod tests {
         );
         assert_eq!(series[0].first, Some(utc(20, 46, 43, 51)));
         assert_eq!(series[0].last, Some(utc(20, 47, 13, 131)));
+        assert_eq!(series[3].latest, Some(65.48));
     }
 
     #[test]

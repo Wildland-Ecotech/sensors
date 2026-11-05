@@ -169,6 +169,7 @@ mod tests {
                 readings: 2_864,
                 first: Some(first),
                 last: Some(last),
+                latest: Some(35.5),
             },
             Series {
                 channel: "#greenhouse".into(),
@@ -178,6 +179,7 @@ mod tests {
                 readings: 0,
                 first: None,
                 last: None,
+                latest: None,
             },
         ];
         let offsets = Offsets::fixed(-420);
