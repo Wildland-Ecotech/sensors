@@ -1,29 +1,104 @@
 //! The sensors page: a chart of each measure over a calendar period, every
-//! nick in the channel together, with a table of each sensor's latest reading and its
-//! lowest, mean and highest over the period, and CSV downloads of it. Faulty
-//! readings are left out of all of them, and flagged unless the address says
-//! `faults=hide`. The address's `at` is a date in the period to show; without
-//! it, the period holding the newest reading.
+//! nick in the channel together, with a table of each sensor's last reading
+//! and its lowest, mean and highest over the period, and CSV downloads of
+//! it. Faulty readings are left out of all of them, and flagged unless the
+//! address says `faults=hide`. The address's `at` is a date in the period to
+//! show; without it, the period holding the newest reading.
+//!
+//! Charts zoom in a step at a time, from everything to a year, a month, a
+//! week and a day, and breadcrumbs zoom back out. A fault mark opens a
+//! close-up: the two hours around it, every reading on its own, with its
+//! faulty readings listed and linked to their lines in the history.
 
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use maud::{Markup, html};
 use serde::Deserialize;
 
-use super::chart::{self, measure_name, sensor_name, slot};
+use super::chart::{self, Options, measure_name, sensor_name, slot};
 use super::layout::{self, number, url_encode};
 use super::{App, Flash, PageError, PageResult, filled, internal, with_db};
-use crate::graphs::{self, Graph, Measure, Period, Range, date_of, decimal, time_text};
+use crate::faults::Reason;
+use crate::graphs::{
+    self, CLOSE_UP_SIDE, Graph, Measure, Period, Range, date_of, decimal, time_text,
+};
 use crate::readings::{HOUR, Offsets};
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
         .route("/sensors", get(sensors_page))
         .route("/sensors.csv", get(download))
+        .route("/sensors/close-up", get(close_up_page))
+}
+
+/// The range one step in from another, or `None` from a day.
+fn zoom_in(range: Range) -> Option<Range> {
+    match range {
+        Range::All => Some(Range::Year),
+        Range::Year => Some(Range::Month),
+        Range::Month => Some(Range::Week),
+        Range::Week => Some(Range::Day),
+        Range::Day => None,
+    }
+}
+
+/// The address of a close-up around a time, as the logs show times.
+fn close_up_href(channel: &str, at: i64) -> String {
+    let at = DateTime::from_timestamp_millis(at)
+        .unwrap_or_default()
+        .naive_utc()
+        .format("%Y-%m-%dT%H:%M:%S");
+    format!("/sensors/close-up?channel={}&at={at}", url_encode(channel))
+}
+
+/// A period's short name for the breadcrumbs, such as `2025`, `June 2025`,
+/// `Week of June 9` or `Wednesday, June 11`.
+fn crumb_name(period: &Period) -> String {
+    let first = period.first_day();
+    match period.range {
+        Range::All => "All".to_string(),
+        Range::Year => first.format("%Y").to_string(),
+        Range::Month => first.format("%B %Y").to_string(),
+        Range::Week => format!("Week of {}", first.format("%B %-d")),
+        Range::Day => first.format("%A, %B %-d").to_string(),
+    }
+}
+
+/// The way back out from a range to everything, through each period
+/// holding `date`: links to each wider one, then `current`, unlinked.
+fn crumbs(view: View<'_>, date: NaiveDate, shown: &Shown, current: &str) -> Markup {
+    const STEPS: [Range; 5] = [
+        Range::All,
+        Range::Year,
+        Range::Month,
+        Range::Week,
+        Range::Day,
+    ];
+    // Wider than what is shown: every step for a close-up.
+    let wider: Vec<Range> = STEPS
+        .into_iter()
+        .take_while(|&range| !current.is_empty() || range != view.range)
+        .collect();
+    html! {
+        nav.crumbs aria-label="Zoom" {
+            @for range in wider {
+                @let period = Period::containing(range, date, shown.first, shown.last);
+                a href=(view.with_range(range).at(Some(date)).href()) { (crumb_name(&period)) }
+                span.muted aria-hidden="true" { " › " }
+            }
+            span aria-current="page" {
+                @if current.is_empty() {
+                    (crumb_name(&shown.period))
+                } @else {
+                    (current)
+                }
+            }
+        }
+    }
 }
 
 /// The range shown when the address names none.
@@ -65,6 +140,8 @@ impl GraphQuery {
 struct Shown {
     channel: String,
     period: Period,
+    /// The date asked for, kept within the readings, or the newest.
+    date: NaiveDate,
     /// The first and newest reading, as the logs show times.
     first: i64,
     last: i64,
@@ -92,6 +169,7 @@ fn shown(
     Ok(Some(Shown {
         channel,
         period: Period::containing(query.range(), date, first, last),
+        date,
         first,
         last,
     }))
@@ -230,6 +308,18 @@ fn page(
         faults,
     };
     let holds_newest = period.end > shown.last;
+    let zoom_to = zoom_in(period.range);
+    let zoom = |date: NaiveDate| {
+        view.with_range(zoom_to.unwrap_or(Range::Day))
+            .at(Some(date))
+            .href()
+    };
+    let close_up = |at: i64| close_up_href(channel, at);
+    let options = Options {
+        faults: view.faults,
+        zoom: zoom_to.map(|_| &zoom as &dyn Fn(NaiveDate) -> String),
+        close_up: Some(&close_up),
+    };
     let faulty: usize = graph
         .iter()
         .flat_map(|graph| &graph.measures)
@@ -296,6 +386,7 @@ fn page(
         @match graph {
             None => p { "No readings in this period." },
             Some(graph) => {
+                (crumbs(view, shown.date, shown, ""))
                 h2.period-name { (period_name(period)) }
                 p.lead {
                     (time_text(graph.start, false)) " to " (time_text(graph.end, false))
@@ -316,7 +407,7 @@ fn page(
                             (name)
                             @if !unit.is_empty() { " (" (unit) ")" }
                         }
-                        (chart::chart(graph, measure, view.faults))
+                        (chart::chart(graph, measure, &options))
                         (summary(graph, measure, view.faults))
                     }
                 }
@@ -411,6 +502,158 @@ fn summary(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
             }
         }
     }
+}
+
+#[derive(Default, Deserialize)]
+struct CloseUpQuery {
+    channel: Option<String>,
+    /// As the logs show times, such as `2026-11-03T13:47:13`.
+    at: Option<String>,
+}
+
+impl CloseUpQuery {
+    /// The time asked for, as the logs show times, if it is one.
+    fn at(&self) -> Option<i64> {
+        let at = NaiveDateTime::parse_from_str(filled(&self.at)?, "%Y-%m-%dT%H:%M:%S").ok()?;
+        Some(at.and_utc().timestamp_millis())
+    }
+}
+
+async fn close_up_page(
+    State(app): State<App>,
+    Query(query): Query<CloseUpQuery>,
+    Query(flash): Query<Flash>,
+) -> PageResult {
+    with_db(&app, move |conn| {
+        let at = query.at().ok_or_else(|| {
+            PageError::not_found("A close-up needs a time, such as at=2026-11-03T13:47:13.")
+        })?;
+        let offsets = Offsets::load(conn).map_err(internal)?;
+        let graph_query = GraphQuery {
+            channel: query.channel.clone(),
+            range: Some(Range::Day.name().to_string()),
+            at: Some(date_of(at).to_string()),
+            ..GraphQuery::default()
+        };
+        let shown = shown(conn, &graph_query, &offsets)?
+            .ok_or_else(|| PageError::not_found("There are no sensor readings yet."))?;
+        let graph = Graph::close_up(conn, &shown.channel, at, &offsets)
+            .map_err(internal)?
+            .ok_or_else(|| PageError::not_found("There are no sensor readings yet."))?;
+        let title = format!("Close-up of {} in {}", time_text(at, true), shown.channel);
+        Ok(layout::page(&title, &flash, close_up(&shown, at, &graph)))
+    })
+    .await
+}
+
+/// The two hours around a time, every reading on its own, and the faulty
+/// readings in them.
+fn close_up(shown: &Shown, at: i64, graph: &Graph) -> Markup {
+    let channel = shown.channel.as_str();
+    let view = View {
+        channel,
+        range: Range::Day,
+        at: Some(shown.date),
+        faults: true,
+    };
+    let mut faults: Vec<(&str, &str, &graphs::Fault)> = graph
+        .measures
+        .iter()
+        .flat_map(|measure| {
+            measure.lines.iter().flat_map(move |line| {
+                line.faults
+                    .iter()
+                    .map(move |fault| (measure.measure.as_str(), line.sensor.as_str(), fault))
+            })
+        })
+        .collect();
+    faults.sort_by_key(|(_, _, fault)| fault.at);
+    let clock = |at: i64| {
+        time_text(at, true)
+            .get(11..)
+            .unwrap_or_default()
+            .to_string()
+    };
+    html! {
+        h1 { "Sensors in " (channel) }
+        (crumbs(view, shown.date, shown, "Close-up"))
+        h2.period-name {
+            "Close-up of " (clock(at)) " on "
+            (period_name(&Period::containing(Range::Day, shown.date, shown.first, shown.last)))
+        }
+        div.period role="group" aria-label="Close-up" {
+            a href=(close_up_href(channel, at - CLOSE_UP_SIDE)) rel="prev" { "← An hour earlier" }
+            a href=(close_up_href(channel, at + CLOSE_UP_SIDE)) rel="next" { "An hour later →" }
+        }
+        p.lead {
+            "Every reading from " (clock(graph.start)) " to " (clock(graph.end))
+            ", as the logs show times, none averaged."
+        }
+        p.note {
+            "Faulty readings are left out of the lines and shown in red: spikes as dots at "
+            "their values, readings out of range as marks along the edge. Each line breaks "
+            "where readings are more than two minutes apart."
+        }
+        @for measure in &graph.measures {
+            @let (name, unit) = measure_name(&measure.measure);
+            section.measure {
+                h2 {
+                    (name)
+                    @if !unit.is_empty() { " (" (unit) ")" }
+                }
+                (chart::chart(graph, measure, &Options::flags(true)))
+            }
+        }
+        h2 { "Faulty readings" }
+        @if faults.is_empty() {
+            p { "No faulty readings in these two hours." }
+        } @else {
+            div.scroll {
+                table {
+                    thead {
+                        tr {
+                            th { "Time" }
+                            th { "Sensor" }
+                            th { "Measure" }
+                            th.num { "Value" }
+                            th { "Why" }
+                            th { "Line" }
+                        }
+                    }
+                    tbody {
+                        @for (measure, sensor, fault) in &faults {
+                            tr {
+                                td { (clock(fault.at)) }
+                                td { (sensor_name(sensor)) }
+                                td { (measure_name(measure).0) }
+                                td.num { (decimal(fault.value)) }
+                                td { (Reason::describe(&fault.reason)) }
+                                td { a href=(history_href(channel, fault)) { "In the history" } }
+                            }
+                        }
+                    }
+                }
+            }
+            p.note {
+                "Each line links to the history of its day, showing the log line it came "
+                "from, to read with the lines around it."
+            }
+        }
+    }
+}
+
+/// The address of a faulty reading's line in the history: its day, and the
+/// line's own timestamp to find it by.
+fn history_href(channel: &str, fault: &graphs::Fault) -> String {
+    let stamp = DateTime::from_timestamp_millis(fault.utc)
+        .map(|at| at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+        .unwrap_or_default();
+    format!(
+        "/history?day={}&channel={}&q={}",
+        date_of(fault.at),
+        url_encode(channel),
+        url_encode(&stamp)
+    )
 }
 
 /// A channel's name for a file name, such as `greenhouse`.
@@ -589,6 +832,7 @@ mod tests {
             start: first - 365 * graphs::DAY,
             end: second,
             point_size: 12 * HOUR,
+            gap: 12 * HOUR,
             sensors: vec!["inside".into(), "outside".into()],
             measures: vec![Measure {
                 measure: "temp".into(),
@@ -598,6 +842,7 @@ mod tests {
                         points: vec![point(first, 51.26)],
                         faults: vec![Fault {
                             at: first,
+                            utc: first + 7 * HOUR,
                             value: 302.0,
                             reason: "range".into(),
                         }],
@@ -617,6 +862,7 @@ mod tests {
         let shown = Shown {
             channel: "#greenhouse".into(),
             period: Period::containing(Range::Year, date(2026, 11, 4), first_reading, last_reading),
+            date: date(2026, 11, 4),
             first: first_reading,
             last: last_reading,
         };
@@ -654,6 +900,18 @@ mod tests {
         );
         assert!(html.contains("fault top"));
 
+        // Zooming in to a month, and out from the breadcrumbs.
+        assert!(html.contains(
+            r#"data-zoom="/sensors?channel=%23greenhouse&amp;range=month&amp;at=0001-01-01""#
+        ));
+        assert!(html.contains(
+            r#"<nav class="crumbs" aria-label="Zoom"><a href="/sensors?channel=%23greenhouse&amp;range=all&amp;at=2026-11-04">All</a>"#
+        ));
+        assert!(html.contains(r#"<span aria-current="page">2026</span>"#));
+        assert!(html.contains(
+            r#"href="/sensors/close-up?channel=%23greenhouse&amp;at=2026-11-04T00:00:00""#
+        ));
+
         let hidden = page(&channels, Some((&shown, None, false)), Some(&graph)).into_string();
         assert!(hidden.contains("Faulty readings are hidden."));
         assert!(hidden.contains(
@@ -666,6 +924,7 @@ mod tests {
         // A week in the past, with the newest a link away.
         let june = Shown {
             period: Period::containing(Range::Week, date(2025, 6, 11), first_reading, last_reading),
+            date: date(2025, 6, 11),
             ..shown
         };
         let past = page(
@@ -685,7 +944,104 @@ mod tests {
             r#"<a href="/sensors?channel=%23greenhouse&amp;range=month&amp;at=2025-06-11">Month</a>"#
         ));
 
+        assert!(past.contains(r#">June 2025</a>"#));
+        assert!(past.contains(r#"<span aria-current="page">Week of June 9</span>"#));
+        assert!(past.contains("range=day&amp;at=0001-01-01"));
+
+        // A day is the last step in.
+        let day = Shown {
+            period: Period::containing(Range::Day, date(2025, 6, 11), first_reading, last_reading),
+            ..june
+        };
+        let one_day = page(
+            &channels,
+            Some((&day, Some(date(2025, 6, 11)), true)),
+            Some(&graph),
+        )
+        .into_string();
+        assert!(!one_day.contains("data-zoom"));
+        assert!(one_day.contains(r#"<span aria-current="page">Wednesday, June 11</span>"#));
+
         let none = page(&[], None, None).into_string();
         assert!(none.contains("No sensor readings yet."));
+    }
+
+    #[test]
+    fn shows_a_close_up_with_its_faults_and_their_lines() {
+        // 2026-11-04 00:00 as the logs show times, 07:00 UTC.
+        let at = 1_793_750_400_000;
+        let close_up_graph = Graph {
+            start: at - CLOSE_UP_SIDE,
+            end: at + CLOSE_UP_SIDE,
+            point_size: 1,
+            gap: 2 * graphs::MINUTE,
+            sensors: vec!["inside".into()],
+            measures: vec![Measure {
+                measure: "humid".into(),
+                lines: vec![Line {
+                    sensor: "inside".into(),
+                    points: vec![Point {
+                        at: at - 30_000,
+                        readings: 1,
+                        total: 40.0,
+                        low: 40.0,
+                        high: 40.0,
+                    }],
+                    faults: vec![Fault {
+                        at,
+                        utc: at + 7 * HOUR,
+                        value: 75.5,
+                        reason: "spike".into(),
+                    }],
+                    latest: None,
+                }],
+            }],
+        };
+        let shown = Shown {
+            channel: "#greenhouse".into(),
+            period: Period::containing(Range::Day, date(2026, 11, 4), 0, at + HOUR),
+            date: date(2026, 11, 4),
+            first: 0,
+            last: at + HOUR,
+        };
+        let html = close_up(&shown, at, &close_up_graph).into_string();
+        assert!(html.contains(
+            r#"<h2 class="period-name">Close-up of 00:00:00 on Wednesday, November 4, 2026</h2>"#
+        ));
+        assert!(html.contains(r#">Wednesday, November 4</a>"#));
+        assert!(html.contains(r#"<span aria-current="page">Close-up</span>"#));
+        assert!(html.contains("Every reading from 23:00:00 to 01:00:00"));
+        assert!(html.contains(
+            r#"href="/sensors/close-up?channel=%23greenhouse&amp;at=2026-11-03T23:00:00" rel="prev""#
+        ));
+        assert!(html.contains("<h2>Humidity (% RH)</h2>"));
+        assert!(html.contains("fault-dot"));
+        assert!(html.contains(
+            r#"<td>00:00:00</td><td>inside</td><td>Humidity</td><td class="num">75.5</td><td>spike</td>"#
+        ));
+        assert!(html.contains(
+            r#"href="/history?day=2026-11-04&amp;channel=%23greenhouse&amp;q=2026-11-04T07%3A00%3A00.000Z""#
+        ));
+
+        let quiet = Graph {
+            measures: vec![],
+            ..close_up_graph
+        };
+        assert!(
+            close_up(&shown, at, &quiet)
+                .into_string()
+                .contains("No faulty readings in these two hours.")
+        );
+
+        let query = CloseUpQuery {
+            channel: None,
+            at: Some("2026-11-04T00:00:00".into()),
+        };
+        assert_eq!(query.at(), Some(at));
+        assert_eq!(CloseUpQuery::default().at(), None);
+        assert_eq!(
+            close_up_href("#greenhouse", at + 1_234),
+            "/sensors/close-up?channel=%23greenhouse&at=2026-11-04T00:00:01"
+        );
     }
 }

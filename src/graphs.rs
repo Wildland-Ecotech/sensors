@@ -15,7 +15,8 @@
 //! twice.
 //!
 //! Faulty readings, as the `faults` module finds them, are left out of every
-//! point, and kept beside each line for the page to flag.
+//! point, and kept beside each line for the page to flag. A close-up shows
+//! the two hours around a time with every reading as its own point.
 //!
 //! Times on graphs are as the logs show them, in milliseconds since 1970 as
 //! if the logs' time zone were UTC, so points and ticks fall on the logs'
@@ -104,6 +105,9 @@ impl Range {
         matches!(self, Range::Day | Range::Week | Range::Month)
     }
 }
+
+/// How far a close-up reaches on each side of its time.
+pub const CLOSE_UP_SIDE: i64 = HOUR;
 
 /// A calendar period of a range, as the logs show times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,6 +407,8 @@ impl Point {
 pub struct Fault {
     /// When, as the logs show times.
     pub at: i64,
+    /// When, in milliseconds since 1970 UTC, as its line's timestamp says.
+    pub utc: i64,
     pub value: f64,
     /// `range` or `spike`.
     pub reason: String,
@@ -447,8 +453,12 @@ pub struct Graph {
     /// show times.
     pub start: i64,
     pub end: i64,
-    /// How long each point is, in milliseconds.
+    /// How long each point is, in milliseconds: 1 for every reading on its
+    /// own.
     pub point_size: i64,
+    /// The longest time between two points that a line joins, in
+    /// milliseconds; further apart, the line breaks.
+    pub gap: i64,
     /// Every sensor in the channel, sorted, so each keeps its color across
     /// measures and ranges.
     pub sensors: Vec<String>,
@@ -466,12 +476,43 @@ impl Graph {
         offsets: &Offsets,
         point_size: Option<i64>,
     ) -> Result<Option<Graph>> {
+        let size = point_size.unwrap_or_else(|| self::point_size(period.end - period.start));
+        Graph::between(
+            conn,
+            channel,
+            (period.start, period.end),
+            offsets,
+            size,
+            size,
+        )
+    }
+
+    /// The hour on each side of `at`, as the logs show times, with every
+    /// reading as its own point, joined unless two minutes apart.
+    pub fn close_up(
+        conn: &Connection,
+        channel: &str,
+        at: i64,
+        offsets: &Offsets,
+    ) -> Result<Option<Graph>> {
+        let window = (at - CLOSE_UP_SIDE, at + CLOSE_UP_SIDE);
+        Graph::between(conn, channel, window, offsets, 1, 2 * MINUTE)
+    }
+
+    /// A channel's graph from `start` up to `end`, as the logs show times.
+    fn between(
+        conn: &Connection,
+        channel: &str,
+        (local_start, local_end): (i64, i64),
+        offsets: &Offsets,
+        size: i64,
+        gap: i64,
+    ) -> Result<Option<Graph>> {
         let groups = groups(conn, channel)?;
         if groups.is_empty() {
             return Ok(None);
         }
-        let (start, end) = utc_window(offsets, period);
-        let size = point_size.unwrap_or_else(|| self::point_size(period.end - period.start));
+        let (start, end) = (utc(offsets, local_start), utc(offsets, local_end) - 1);
         let bucket = |at: i64| local(offsets, at).div_euclid(size) * size;
 
         let mut sensors: Vec<String> = groups.iter().map(|group| group.sensor.clone()).collect();
@@ -521,6 +562,7 @@ impl Graph {
                 .into_iter()
                 .map(|(at, value, reason)| Fault {
                     at: local(offsets, at),
+                    utc: at,
                     value,
                     reason,
                 })
@@ -546,9 +588,10 @@ impl Graph {
             }
         }
         Ok(Some(Graph {
-            start: period.start,
-            end: period.end,
+            start: local_start,
+            end: local_end,
             point_size: size,
+            gap,
             sensors,
             measures,
         }))
@@ -932,6 +975,7 @@ mod tests {
             inside.faults,
             [Fault {
                 at: inside.faults[0].at,
+                utc: inside.faults[0].utc,
                 value: 302.0,
                 reason: "range".into()
             }]
@@ -948,5 +992,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!without.contains("302"));
+    }
+
+    #[test]
+    fn shows_every_reading_in_a_close_up() {
+        let (_root, conn, offsets) = setup("graphs-close-up");
+        let at = midnight(day(11, 3)) + 13 * HOUR + 47 * MINUTE;
+        let graph = Graph::close_up(&conn, "#greenhouse", at, &offsets)
+            .unwrap()
+            .unwrap();
+        assert_eq!((graph.point_size, graph.gap), (1, 2 * MINUTE));
+        assert_eq!(time_text(graph.start, false), "2026-11-03 12:47");
+        assert_eq!(time_text(graph.end, false), "2026-11-03 14:47");
+        // Each reading its own point; 15:10 is outside the two hours.
+        let inside: Vec<String> = graph.measures[0].lines[0]
+            .points
+            .iter()
+            .map(|point| format!("{} {}", time_text(point.at, true), decimal(point.mean())))
+            .collect();
+        assert_eq!(
+            inside,
+            ["2026-11-03 13:46:43 68.54", "2026-11-03 13:47:13 68.36"]
+        );
     }
 }

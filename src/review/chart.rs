@@ -3,8 +3,16 @@
 //! to its highest reading. Faulty readings, which the lines and the axis
 //! leave out, are flagged as red marks along the top or bottom edge, on the
 //! side of the chart their values lie, with what they were in the mark's
-//! title. They need no script. `chart.js` adds a crosshair
-//! and a tooltip from the points in the chart's `data-points`.
+//! title. In a close-up of every reading, spikes are drawn as red dots at
+//! their values instead.
+//!
+//! A chart can zoom: the times below it link to the period one step in, and
+//! each fault mark to a close-up around it. Each edge mark carries its faulty
+//! readings in `data-faults`, for the script to draw them into the chart
+//! while the mark is hovered or focused. They need no script. `chart.js`
+//! adds a crosshair and a tooltip from the points in the chart's
+//! `data-points`, and zooms where the chart is clicked, from its
+//! `data-zoom`, `data-start` and `data-end`.
 //!
 //! The lines are an SVG stretched to the plot's box, with strokes that keep
 //! their width, while the axis labels are HTML placed by percentage, so text
@@ -18,7 +26,7 @@ use maud::{Markup, html};
 use serde_json::json;
 
 use crate::faults::Reason;
-use crate::graphs::{DAY, Graph, Line, MINUTE, Measure, Point, decimal, time_text};
+use crate::graphs::{DAY, Graph, Line, MINUTE, Measure, Point, date_of, decimal, time_text};
 use crate::readings::HOUR;
 
 /// The SVG's drawing space, stretched to the plot's box.
@@ -29,6 +37,29 @@ const SLOTS: usize = 8;
 
 /// The most time ticks along the bottom.
 const MAX_TICKS: usize = 8;
+
+/// What a chart offers besides its lines.
+pub struct Options<'a> {
+    /// Flag faulty readings.
+    pub faults: bool,
+    /// The address of the period one step in holding a date, for clicks and
+    /// the times below; `None` at the last step.
+    pub zoom: Option<&'a dyn Fn(NaiveDate) -> String>,
+    /// The address of a close-up around a time, as the logs show it, for
+    /// the fault marks.
+    pub close_up: Option<&'a dyn Fn(i64) -> String>,
+}
+
+impl Options<'_> {
+    /// Flagging faulty readings or not, with nothing to zoom to.
+    pub fn flags(faults: bool) -> Self {
+        Options {
+            faults,
+            zoom: None,
+            close_up: None,
+        }
+    }
+}
 
 /// A sensor's color slot, from 1, kept across measures and ranges; 0, gray,
 /// past the eighth sensor.
@@ -54,8 +85,12 @@ pub fn sensor_name(sensor: &str) -> &str {
     if sensor.is_empty() { "-" } else { sensor }
 }
 
-/// How long a point is, such as `2 minutes`, `1 hour` or `1 week`.
+/// How long a point is, such as `2 minutes`, `1 hour` or `1 week`, or
+/// `each reading` for every reading on its own.
 pub fn duration_words(ms: i64) -> String {
+    if ms < MINUTE {
+        return "each reading".to_string();
+    }
     let (count, unit) = if ms % (7 * DAY) == 0 {
         (ms / (7 * DAY), "week")
     } else if ms % DAY == 0 {
@@ -69,9 +104,9 @@ pub fn duration_words(ms: i64) -> String {
 }
 
 /// A point's start, with the time of day when points are shorter than a
-/// day.
+/// day, and to the second for every reading on its own.
 fn point_time(at: i64, point_size: i64) -> String {
-    let text = time_text(at, false);
+    let text = time_text(at, point_size < MINUTE);
     if point_size >= DAY {
         text.get(..10).unwrap_or(&text).to_string()
     } else {
@@ -83,9 +118,13 @@ fn point_time(at: i64, point_size: i64) -> String {
 struct FaultGroup {
     /// The point's start, as the logs show times.
     at: i64,
+    /// The first faulty reading's time, as the logs show times.
+    first: i64,
     /// The line's index among the measure's lines.
     line: usize,
     values: Vec<f64>,
+    /// Each value's time, as the logs show times.
+    times: Vec<i64>,
     reasons: BTreeSet<String>,
 }
 
@@ -121,27 +160,93 @@ fn fault_groups(graph: &Graph, measure: &Measure) -> Vec<FaultGroup> {
             let at = fault.at.div_euclid(graph.point_size) * graph.point_size;
             let group = groups.entry((at, index)).or_insert_with(|| FaultGroup {
                 at,
+                first: fault.at,
                 line: index,
                 values: Vec::new(),
+                times: Vec::new(),
                 reasons: BTreeSet::new(),
             });
+            group.first = group.first.min(fault.at);
             group.values.push(fault.value);
+            group.times.push(fault.at);
             group.reasons.insert(fault.reason.clone());
         }
     }
     groups.into_values().collect()
 }
 
+impl FaultGroup {
+    /// Whether it is drawn as a dot at its value: spikes, in a close-up of
+    /// every reading, where they are what is being looked at.
+    fn dot(&self, graph: &Graph) -> bool {
+        graph.point_size < MINUTE && self.reasons.iter().all(|reason| reason == "spike")
+    }
+}
+
+impl FaultGroup {
+    /// Its readings for the script, oldest first, as `[[x, value], ...]`,
+    /// with `x` from 0 to 1 across the plot.
+    fn preview(&self, scale: &Scale) -> String {
+        let mut readings: Vec<(i64, f64)> = self
+            .times
+            .iter()
+            .copied()
+            .zip(self.values.iter().copied())
+            .collect();
+        readings.sort_by_key(|&(at, _)| at);
+        let readings: Vec<[f64; 2]> = readings
+            .into_iter()
+            .map(|(at, value)| [(scale.x(at) / SIZE * 10_000.0).round() / 10_000.0, value])
+            .collect();
+        json!(readings).to_string()
+    }
+}
+
+/// A fault mark, linking to a close-up when there is one. An edge mark
+/// carries its line's index and its readings, for the script to draw.
+fn fault_mark(
+    class: &str,
+    style: &str,
+    title: &str,
+    href: Option<String>,
+    preview: Option<(usize, String)>,
+) -> Markup {
+    let (line, faults) = preview.unzip();
+    html! {
+        @match href {
+            Some(href) => a class=(class) style=(style) title=(title) href=(href)
+                data-line=[line] data-faults=[faults] {},
+            None => span class=(class) style=(style) title=(title)
+                data-line=[line] data-faults=[faults] {},
+        }
+    }
+}
+
 /// One measure's chart: its legend, the plot with its axes, the faulty
-/// readings' marks when `faults` is set, and the points for the script.
-pub fn chart(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
+/// readings' marks when they are flagged, and the points for the script.
+pub fn chart(graph: &Graph, measure: &Measure, options: &Options<'_>) -> Markup {
     let (name, unit) = measure_name(&measure.measure);
+    let groups = if options.faults {
+        fault_groups(graph, measure)
+    } else {
+        Vec::new()
+    };
+    // Spikes drawn as dots count towards the axis; other faults never do.
+    let dots = || {
+        groups
+            .iter()
+            .filter(|group| group.dot(graph))
+            .flat_map(|group| &group.values)
+            .copied()
+    };
     let points = || measure.lines.iter().flat_map(|line| &line.points);
     let low = points()
         .map(|point| point.low)
+        .chain(dots())
         .fold(f64::INFINITY, f64::min);
     let high = points()
         .map(|point| point.high)
+        .chain(dots())
         .fold(f64::NEG_INFINITY, f64::max);
     if !low.is_finite() || !high.is_finite() {
         return html! { p { "No " (name.to_lowercase()) " readings in this period." } };
@@ -153,12 +258,12 @@ pub fn chart(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
         low: values[0],
         high: values[values.len() - 1],
     };
-    let groups = if faults {
-        fault_groups(graph, measure)
-    } else {
-        Vec::new()
-    };
     let middle = (scale.low + scale.high) / 2.0;
+    let zoom = options.zoom;
+    // The address of a period one step in, at a date the script replaces.
+    let zoom_template = zoom
+        .zip(NaiveDate::from_ymd_opt(1, 1, 1))
+        .map(|(zoom, sentinel)| zoom(sentinel));
     let label = format!(
         "{name} from {} to {}: {}",
         time_text(graph.start, false),
@@ -179,7 +284,8 @@ pub fn chart(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
             .join(", ")
     );
     html! {
-        figure.chart data-points=(points_json(graph, measure, unit, &groups)) {
+        figure.chart data-points=(points_json(graph, measure, unit, &groups, &scale))
+            data-zoom=[zoom_template] data-start=(graph.start) data-end=(graph.end) {
             @if measure.lines.len() > 1 || !groups.is_empty() {
                 div.chart-legend {
                     @for line in &measure.lines {
@@ -205,18 +311,21 @@ pub fn chart(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
                         }
                     }
                 }
-                div.plot role="img" aria-label=(label) {
+                div.plot.zoomable[zoom.is_some()] role="img" aria-label=(label) {
                     svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true" {
                         @for value in &values {
                             line.grid x1="0" x2="1000"
                                 y1=(format!("{:.1}", scale.y(*value)))
                                 y2=(format!("{:.1}", scale.y(*value))) {}
                         }
-                        @for line in &measure.lines {
-                            @let paths = paths(line, graph.point_size, &scale);
-                            @let slot = slot(graph, &line.sensor);
-                            path class=(format!("band s{slot}")) d=(paths.band) {}
-                            path class=(format!("line s{slot}")) d=(paths.line) {}
+                        // The script rescales this while it draws faults off the axis.
+                        g.data {
+                            @for line in &measure.lines {
+                                @let paths = paths(line, graph.point_size, graph.gap, &scale);
+                                @let slot = slot(graph, &line.sensor);
+                                path class=(format!("band s{slot}")) d=(paths.band) {}
+                                path class=(format!("line s{slot}")) d=(paths.line) {}
+                            }
                         }
                     }
                     @if !groups.is_empty() {
@@ -230,20 +339,44 @@ pub fn chart(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
                                     sensor_name(&line.sensor),
                                     group.describe()
                                 );
-                                @for top in [true, false] {
-                                    @if group.values.iter().any(|&v| (v >= middle) == top) {
-                                        span class=(if top { "fault top" } else { "fault bottom" })
-                                            style=(format!("left: {left:.2}%"))
-                                            title=(title) {}
+                                @let href = || options.close_up.map(|close_up| close_up(group.first));
+                                @if group.dot(graph) {
+                                    @for value in &group.values {
+                                        (fault_mark(
+                                            "fault-dot",
+                                            &format!(
+                                                "left: {left:.2}%; top: {:.2}%",
+                                                scale.y(*value) / SIZE * 100.0
+                                            ),
+                                            &title,
+                                            None,
+                                            None,
+                                        ))
+                                    }
+                                } @else {
+                                    @for top in [true, false] {
+                                        @if group.values.iter().any(|&v| (v >= middle) == top) {
+                                            (fault_mark(
+                                                if top { "fault top" } else { "fault bottom" },
+                                                &format!("left: {left:.2}%"),
+                                                &title,
+                                                href(),
+                                                Some((group.line, group.preview(&scale))),
+                                            ))
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-                div.x-axis aria-hidden="true" {
+                div.x-axis {
                     @for (at, text) in time_ticks(graph.start, graph.end) {
-                        span style=(format!("left: {:.2}%", scale.x(at) / SIZE * 100.0)) { (text) }
+                        @let style = format!("left: {:.2}%", scale.x(at) / SIZE * 100.0);
+                        @match zoom {
+                            Some(zoom) => a style=(style) href=(zoom(date_of(at))) { (text) },
+                            None => span style=(style) aria-hidden="true" { (text) },
+                        }
                     }
                 }
             }
@@ -281,9 +414,9 @@ struct Paths {
     band: String,
 }
 
-/// The paths of a line, broken wherever a point is missing, so a gap in the
-/// readings shows as a gap. A point on its own is a dot.
-fn paths(line: &Line, point_size: i64, scale: &Scale) -> Paths {
+/// The paths of a line, broken wherever points are more than `gap` apart,
+/// so a gap in the readings shows as a gap. A point on its own is a dot.
+fn paths(line: &Line, point_size: i64, gap: i64, scale: &Scale) -> Paths {
     let mut paths = Paths {
         line: String::new(),
         band: String::new(),
@@ -291,7 +424,7 @@ fn paths(line: &Line, point_size: i64, scale: &Scale) -> Paths {
     let mut runs: Vec<&[Point]> = Vec::new();
     let mut from = 0;
     for i in 1..=line.points.len() {
-        if i == line.points.len() || line.points[i].at - line.points[i - 1].at > point_size {
+        if i == line.points.len() || line.points[i].at - line.points[i - 1].at > gap {
             runs.push(&line.points[from..i]);
             from = i;
         }
@@ -328,8 +461,16 @@ fn paths(line: &Line, point_size: i64, scale: &Scale) -> Paths {
 
 /// The points as JSON for the script: each point's time label and place
 /// across the plot, and each sensor's mean, lowest and highest value there,
-/// or `null` where it has none.
-fn points_json(graph: &Graph, measure: &Measure, unit: &str, groups: &[FaultGroup]) -> String {
+/// or `null` where it has none. In a close-up, where each reading is its own
+/// point and sensors post a moment apart, `near` is how far across the plot
+/// the tooltip may look for a sensor's nearest reading: the line's gap.
+fn points_json(
+    graph: &Graph,
+    measure: &Measure,
+    unit: &str,
+    groups: &[FaultGroup],
+    axis: &Scale,
+) -> String {
     let scale = Scale {
         start: graph.start,
         end: graph.end,
@@ -347,6 +488,12 @@ fn points_json(graph: &Graph, measure: &Measure, unit: &str, groups: &[FaultGrou
         *slot = i;
     }
     let round = |value: f64| (value * 100.0).round() / 100.0;
+    let near = if graph.point_size < MINUTE {
+        let span = (graph.end - graph.start).max(1) as f64;
+        (graph.gap as f64 / span * 1_000_000.0).round() / 1_000_000.0
+    } else {
+        0.0
+    };
     let times: Vec<String> = index
         .keys()
         .map(|&at| point_time(at, graph.point_size))
@@ -391,6 +538,10 @@ fn points_json(graph: &Graph, measure: &Measure, unit: &str, groups: &[FaultGrou
         "x": x,
         "unit": unit,
         "every": duration_words(graph.point_size),
+        "near": near,
+        // The values at the bottom and top of the chart.
+        "low": axis.low,
+        "high": axis.high,
         "series": series,
     })
     .to_string()
@@ -426,13 +577,17 @@ fn value_ticks(low: f64, high: f64) -> (Vec<f64>, usize) {
 /// How far apart time ticks are.
 #[derive(Clone, Copy)]
 enum Step {
+    Minutes(i64),
     Hours(i64),
     Days(i64),
     Weeks,
     Months(i32),
 }
 
-const STEPS: [Step; 14] = [
+const STEPS: [Step; 17] = [
+    Step::Minutes(10),
+    Step::Minutes(15),
+    Step::Minutes(30),
     Step::Hours(1),
     Step::Hours(3),
     Step::Hours(6),
@@ -482,6 +637,7 @@ fn ticks_every(step: Step, start: i64, end: i64) -> Vec<(i64, String)> {
         }
     };
     match step {
+        Step::Minutes(minutes) => every(minutes * MINUTE, 0, &mut ticks, false),
         Step::Hours(hours) => every(hours * HOUR, 0, &mut ticks, false),
         Step::Days(days) => every(days * DAY, 0, &mut ticks, true),
         // 1970-01-05 was a Monday.
@@ -612,6 +768,7 @@ mod tests {
             start: nov(3, 0, 0),
             end: nov(3, 10, 0),
             point_size: HOUR,
+            gap: HOUR,
             sensors: vec!["inside".into(), "outside".into()],
             measures: vec![Measure {
                 measure: "temp".into(),
@@ -638,7 +795,7 @@ mod tests {
             low: 40.0,
             high: 70.0,
         };
-        let paths = paths(&line, HOUR, &scale);
+        let paths = paths(&line, HOUR, HOUR, &scale);
         assert_eq!(
             paths.line,
             "M50.0,666.7 L150.0,333.3M550.0,500.0 L550.0,500.0"
@@ -666,7 +823,7 @@ mod tests {
             },
         ];
         let graph = graph(lines);
-        let html = chart(&graph, &graph.measures[0], true).into_string();
+        let html = chart(&graph, &graph.measures[0], &Options::flags(true)).into_string();
         assert!(html.contains(r#"<span class="line-key s1"></span>inside"#));
         assert!(html.contains(r#"<span class="line-key s2"></span>outside"#));
         assert!(html.contains(r#"<path class="line s2" d="M150.0,"#));
@@ -679,7 +836,7 @@ mod tests {
 
         let empty = graph_with_no_points();
         assert!(
-            chart(&empty, &empty.measures[0], true)
+            chart(&empty, &empty.measures[0], &Options::flags(true))
                 .into_string()
                 .contains("No temperature readings")
         );
@@ -689,6 +846,7 @@ mod tests {
     fn flags_faulty_readings_at_the_edge_they_lie_beyond() {
         let fault = |at: i64, value: f64, reason: &str| Fault {
             at,
+            utc: at + 7 * HOUR,
             value,
             reason: reason.into(),
         };
@@ -703,9 +861,9 @@ mod tests {
             latest: None,
         };
         let graph = graph(vec![line]);
-        let html = chart(&graph, &graph.measures[0], true).into_string();
+        let html = chart(&graph, &graph.measures[0], &Options::flags(true)).into_string();
         assert!(html.contains(
-            r#"<span class="fault top" style="left: 5.00%" title="2026-11-03 00:00 inside: 2 faulty readings: 302, 302.5, out of range"></span>"#
+            r#"<span class="fault top" style="left: 5.00%" title="2026-11-03 00:00 inside: 2 faulty readings: 302, 302.5, out of range" data-line="0" data-faults="[[0.0167,302.0],[0.0667,302.5]]"></span>"#
         ));
         assert!(html.contains(r#"<span class="fault bottom" style="left: 25.00%""#));
         assert!(html.contains("Faulty readings, left out"));
@@ -713,10 +871,99 @@ mod tests {
         // The axis leaves them out.
         assert!(!html.contains(">300<"));
 
-        let hidden = chart(&graph, &graph.measures[0], false).into_string();
+        let hidden = chart(&graph, &graph.measures[0], &Options::flags(false)).into_string();
         assert!(!hidden.contains("fault top"));
         assert!(!hidden.contains("Faulty readings"));
         assert!(hidden.contains("&quot;faults&quot;:[null,null]"));
+    }
+
+    #[test]
+    fn zooms_from_clicks_times_and_fault_marks() {
+        let line = Line {
+            sensor: "inside".into(),
+            points: vec![point(nov(3, 0, 0), 50.0), point(nov(3, 1, 0), 60.0)],
+            faults: vec![Fault {
+                at: nov(3, 0, 10),
+                utc: nov(3, 7, 10),
+                value: 302.0,
+                reason: "range".into(),
+            }],
+            latest: None,
+        };
+        let graph = graph(vec![line]);
+        let zoom = |date: NaiveDate| format!("/zoom?at={date}");
+        let close_up = |at: i64| format!("/close-up?at={}", time_text(at, true));
+        let options = Options {
+            faults: true,
+            zoom: Some(&zoom),
+            close_up: Some(&close_up),
+        };
+        let html = chart(&graph, &graph.measures[0], &options).into_string();
+        assert!(html.contains(r#"data-zoom="/zoom?at=0001-01-01""#));
+        assert!(html.contains(&format!(r#"data-start="{}""#, nov(3, 0, 0))));
+        assert!(html.contains(r#"<div class="plot zoomable""#));
+        assert!(html.contains(r#"<a style="left: 0.00%" href="/zoom?at=2026-11-03">Nov 3</a>"#));
+        assert!(html.contains(r#"href="/close-up?at=2026-11-03 00:10:00""#));
+
+        // The last step, a day, does not zoom.
+        let plain = chart(&graph, &graph.measures[0], &Options::flags(true)).into_string();
+        assert!(!plain.contains("data-zoom"));
+        assert!(!plain.contains("zoomable"));
+        assert!(plain.contains(r#"<span class="fault top""#));
+    }
+
+    #[test]
+    fn draws_spikes_at_their_values_in_a_close_up() {
+        let reading = |minute: u32, value: f64| point(nov(3, 13, minute), value);
+        let line = Line {
+            sensor: "inside".into(),
+            points: vec![reading(40, 45.0), reading(41, 45.5), reading(43, 46.0)],
+            faults: vec![
+                Fault {
+                    at: nov(3, 13, 42),
+                    utc: nov(3, 20, 42),
+                    value: 70.0,
+                    reason: "spike".into(),
+                },
+                Fault {
+                    at: nov(3, 13, 44),
+                    utc: nov(3, 20, 44),
+                    value: 302.0,
+                    reason: "range".into(),
+                },
+            ],
+            latest: None,
+        };
+        let close_up = Graph {
+            start: nov(3, 13, 0),
+            end: nov(3, 15, 0),
+            point_size: 1,
+            gap: 2 * MINUTE,
+            ..graph(vec![line])
+        };
+        let html = chart(&close_up, &close_up.measures[0], &Options::flags(true)).into_string();
+        // The axis reaches the spike, but not the reading out of range.
+        assert!(html.contains(">70<"));
+        assert!(!html.contains(">300<"));
+        assert!(html.contains(r#"<span class="fault-dot" style="left: 35.00%; top: "#));
+        assert!(html.contains(r#"<span class="fault top" style="left: 36.67%""#));
+        assert!(html.contains("&quot;every&quot;:&quot;each reading&quot;"));
+        assert!(html.contains("&quot;2026-11-03 13:42:00&quot;"));
+        // Two minutes of the two hours, for the tooltip to find each sensor.
+        assert!(html.contains("&quot;near&quot;:0.016667"));
+        // Readings up to two minutes apart are joined, as 13:41 and 13:43 are.
+        let paths = paths(
+            &close_up.measures[0].lines[0],
+            1,
+            2 * MINUTE,
+            &Scale {
+                start: close_up.start,
+                end: close_up.end,
+                low: 40.0,
+                high: 80.0,
+            },
+        );
+        assert_eq!(paths.line.matches('M').count(), 1);
     }
 
     fn graph_with_no_points() -> Graph {

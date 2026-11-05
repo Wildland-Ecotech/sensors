@@ -22,9 +22,14 @@ the charts.
   with a line for each sensor, see [Graphs](#graphs). Links above the charts
   show a calendar day, week, month or year, or everything, opening on the
   one with the newest reading. **Earlier** and **Later** step one period at a
-  time, as far as the readings go, and **Newest** comes back. Under each
-  chart, each sensor's last reading in the period, and its lowest, mean and
-  highest. Below them, CSV downloads of the period.
+  time, as far as the readings go, and **Newest** comes back. Click a chart
+  to zoom in, see [Zooming](#zooming). Under each chart, each sensor's last
+  reading in the period, and its lowest, mean and highest. Below them, CSV
+  downloads of the period.
+- **Close-up:** the two hours around a time, every reading on its own, none
+  averaged, opened from a fault mark. Its faulty readings are listed with a
+  link to each one's line in the History, and **An hour earlier** and **An
+  hour later** move along.
 - **History:** the lines said in channels one day at a time, the way irssi
   shows them, newest first, 200 to a page. It opens on the most recent day,
   with filters for a channel, a day and text the lines contain. Below them,
@@ -76,7 +81,12 @@ the charts.
   left out of the lines, the axis and the tables, and flagged as red
   triangles along the top or bottom edge, on the side their values lie
   beyond, one for each sensor and point. The mark's title, and the tooltip,
-  say how many there were, their values and why they are faulty. Above the
+  say how many there were, their values and why they are faulty. Hovering a
+  mark, or focusing it with Tab, draws its readings into the chart as a
+  dashed red line through their values, from the line's point before them to
+  the one after, to see what they would look like included; when they lie
+  off the chart, its scale stretches to hold them until you move away.
+  Clicking a mark opens a close-up of it, see [Zooming](#zooming). Above the
   charts, the number flagged in the period, and **Hide them** to leave the
   marks out, which stays set as you change periods; **Flag them** shows them
   again. The table under each chart counts them for each sensor.
@@ -85,6 +95,26 @@ the charts.
   sensor's mean, lowest and highest there, and any faulty readings left out
   of it. Without the script, the table under each chart, the marks' titles
   and the downloads give the same values.
+
+### Zooming
+
+- **Clicking a chart** opens the period one step in that holds the time
+  clicked: everything zooms to a year, a year to a month, a month to a week
+  and a week to a day, the last step. With a chart focused, Enter zooms in
+  at the point the tooltip shows.
+- **The times below a chart** link to the same periods, so zooming works
+  without the script too.
+- **The breadcrumbs** above the period's name, such as `All › 2025 › June
+  2025 › Week of June 9`, zoom back out.
+- **A fault mark** opens a close-up of the two hours around its first
+  faulty reading. There, spikes are red dots at their values, so a humidity
+  spike from watering, which rises and falls over several readings, can be
+  told from a glitch of one reading. Readings out of range stay as marks
+  along the edge, since their values would flatten the chart. A line
+  breaks where readings are more than two minutes apart.
+- **In the History** opens the faulty reading's day in the History, filtered
+  to its line by the timestamp in it; clear the filter to read the lines
+  around it.
 
 ### Downloads
 
