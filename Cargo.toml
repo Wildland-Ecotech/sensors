@@ -1,0 +1,13 @@
+[package]
+name = "sensors"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Graphs readings that sensors post to IRC, from irssi logs"
+repository = "https://github.com/Wildland-Ecotech/sensors"
+license-file = "LICENSE"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+clap = { version = "4.6", features = ["derive"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
