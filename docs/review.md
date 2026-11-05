@@ -20,9 +20,11 @@ the charts.
   see [Time zones](readings.md#time-zones). **Analyze now** reads new lines.
 - **Sensors:** a chart of each measure, such as temperature and humidity,
   with a line for each sensor, see [Graphs](#graphs). Links above the charts
-  show the last day, week, month or year up to the newest reading, or all of
-  it. Under each chart, each sensor's latest reading, and its lowest, mean
-  and highest over the range. Below them, CSV downloads of the range.
+  show a calendar day, week, month or year, or everything, opening on the
+  one with the newest reading. **Earlier** and **Later** step one period at a
+  time, as far as the readings go, and **Newest** comes back. Under each
+  chart, each sensor's last reading in the period, and its lowest, mean and
+  highest. Below them, CSV downloads of the period.
 - **History:** the lines said in channels one day at a time, the way irssi
   shows them, newest first, 200 to a page. It opens on the most recent day,
   with filters for a channel, a day and text the lines contain. Below them,
@@ -45,7 +47,13 @@ the charts.
   device, since one that reconnects often comes back as `greenhouse1` or
   `greenhouse10`. So a line is one measure from one sensor, every nick
   together.
-- **Points.** A range is cut into points of one size, the smallest that
+- **Periods.** A day runs midnight to midnight, a week Monday to Sunday,
+  and months and years are calendar ones, all as the logs show times.
+  Everything runs from the first reading to the newest. The address's `at`
+  is a date in the period shown, such as `at=2025-06-11`, so a link to a
+  period can be shared or bookmarked; changing the range keeps it, so a week
+  in June becomes June, then 2025.
+- **Points.** A period is cut into points of one size, the smallest that
   keeps a line under 800 points: 2 minutes for a day, 15 for a week, an hour
   for a month, 12 hours for a year, and a day or a week for everything. The
   line goes through each point's mean, and a faint band spans its lowest to
@@ -69,8 +77,8 @@ the charts.
   triangles along the top or bottom edge, on the side their values lie
   beyond, one for each sensor and point. The mark's title, and the tooltip,
   say how many there were, their values and why they are faulty. Above the
-  charts, the number flagged in the range, and **Hide them** to leave the
-  marks out, which stays set as you change ranges; **Flag them** shows them
+  charts, the number flagged in the period, and **Hide them** to leave the
+  marks out, which stays set as you change periods; **Flag them** shows them
   again. The table under each chart counts them for each sensor.
 - **Tooltips.** Hovering over a chart, or focusing it with Tab and using the
   arrow keys, Home and End, shows the time of the nearest point and every
@@ -80,7 +88,9 @@ the charts.
 
 ### Downloads
 
-CSV files with a header row, oldest first, every nick together:
+CSV files of the period shown, with a header row, oldest first, every nick
+together, named for the channel, range, first day and kind, such as
+`greenhouse-week-2026-11-02-readings.csv`:
 
 - **The points shown** and **hourly points:** `time` (the point's start,
   as the logs show it), `sensor`, `measure`, `readings`, `mean`, `low`,

@@ -144,7 +144,7 @@ pub fn chart(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
         .map(|point| point.high)
         .fold(f64::NEG_INFINITY, f64::max);
     if !low.is_finite() || !high.is_finite() {
-        return html! { p { "No " (name.to_lowercase()) " readings in this range." } };
+        return html! { p { "No " (name.to_lowercase()) " readings in this period." } };
     }
     let (values, decimals) = value_ticks(low, high);
     let scale = Scale {
@@ -449,7 +449,8 @@ const STEPS: [Step; 14] = [
     Step::Months(60),
 ];
 
-/// Ticks along the bottom from `start` to `end`, on round hours, midnights,
+/// Ticks along the bottom from `start` up to, but not at, `end`, where the
+/// next period starts, on round hours, midnights,
 /// Mondays or the first of a month, with their labels: the time of day, a
 /// date such as `Nov 3`, a month, or a year at January.
 fn time_ticks(start: i64, end: i64) -> Vec<(i64, String)> {
@@ -470,7 +471,7 @@ fn ticks_every(step: Step, start: i64, end: i64) -> Vec<(i64, String)> {
         if at < start {
             at += size;
         }
-        while at <= end && ticks.len() <= MAX_TICKS {
+        while at < end && ticks.len() <= MAX_TICKS {
             let format = if day_labels || at.rem_euclid(DAY) == 0 {
                 "%b %-d"
             } else {
@@ -492,16 +493,11 @@ fn ticks_every(step: Step, start: i64, end: i64) -> Vec<(i64, String)> {
                 month += 1;
             }
             month += (months - month.rem_euclid(months)) % months;
-            loop {
-                let Some(first) = NaiveDate::from_ymd_opt(
-                    month.div_euclid(12),
-                    month.rem_euclid(12) as u32 + 1,
-                    1,
-                ) else {
-                    break;
-                };
+            while let Some(first) =
+                NaiveDate::from_ymd_opt(month.div_euclid(12), month.rem_euclid(12) as u32 + 1, 1)
+            {
                 let at = first.and_time(NaiveTime::MIN).and_utc().timestamp_millis();
-                if at > end || ticks.len() > MAX_TICKS {
+                if at >= end || ticks.len() > MAX_TICKS {
                     break;
                 }
                 let format = if months >= 12 || first.month() == 1 {
@@ -574,7 +570,8 @@ mod tests {
                 "Nov 2", "Nov 3", "Nov 4", "Nov 5", "Nov 6", "Nov 7", "Nov 8"
             ]
         );
-        let month = time_ticks(nov(1, 0, 0), nov(30, 0, 0));
+        // November, up to December 1.
+        let month = time_ticks(nov(1, 0, 0), nov(30, 0, 0) + DAY);
         assert_eq!(
             labels(&month),
             ["Nov 2", "Nov 9", "Nov 16", "Nov 23", "Nov 30"]
@@ -682,7 +679,7 @@ mod tests {
 
         let empty = graph_with_no_points();
         assert!(
-            chart(&empty, &empty.measures[0])
+            chart(&empty, &empty.measures[0], true)
                 .into_string()
                 .contains("No temperature readings")
         );

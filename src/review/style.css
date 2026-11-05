@@ -327,6 +327,20 @@ table.lines td.wrap {
     font-weight: 600;
 }
 
+/* Earlier and Later, beside the ranges. */
+.period {
+    display: inline-flex;
+    gap: 1rem;
+    align-items: center;
+}
+
+/* The period shown, above its charts. */
+h2.period-name {
+    margin: 1rem 0 0;
+    border-bottom: none;
+    font-size: 1.35rem;
+}
+
 figure.chart {
     margin: 0.5rem 0 1rem;
 }

@@ -1,21 +1,23 @@
-//! The sensors page: a chart of each measure over a range, every nick in the
-//! channel together, with a table of each sensor's latest reading and its
-//! lowest, mean and highest over the range, and CSV downloads of it. Faulty
+//! The sensors page: a chart of each measure over a calendar period, every
+//! nick in the channel together, with a table of each sensor's latest reading and its
+//! lowest, mean and highest over the period, and CSV downloads of it. Faulty
 //! readings are left out of all of them, and flagged unless the address says
-//! `faults=hide`.
+//! `faults=hide`. The address's `at` is a date in the period to show; without
+//! it, the period holding the newest reading.
 
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use chrono::NaiveDate;
 use maud::{Markup, html};
 use serde::Deserialize;
 
 use super::chart::{self, measure_name, sensor_name, slot};
 use super::layout::{self, number, url_encode};
 use super::{App, Flash, PageError, PageResult, filled, internal, with_db};
-use crate::graphs::{self, Graph, Measure, Range, decimal, time_text};
+use crate::graphs::{self, Graph, Measure, Period, Range, date_of, decimal, time_text};
 use crate::readings::{HOUR, Offsets};
 
 pub(super) fn routes() -> Router<App> {
@@ -32,6 +34,8 @@ struct GraphQuery {
     channel: Option<String>,
     /// A range's name, such as `week`.
     range: Option<String>,
+    /// A date in the period to show, as `YYYY-MM-DD`.
+    at: Option<String>,
     /// For a download: `shown`, `hours` or `readings`.
     points: Option<String>,
     /// `hide` to hide faulty readings.
@@ -49,6 +53,48 @@ impl GraphQuery {
     fn faults(&self) -> bool {
         filled(&self.faults) != Some("hide")
     }
+
+    /// The date asked for, if it is one.
+    fn at(&self) -> Option<NaiveDate> {
+        filled(&self.at).and_then(|at| NaiveDate::parse_from_str(at, "%Y-%m-%d").ok())
+    }
+}
+
+/// What a page or download shows: the channel's period, and how far its
+/// readings go.
+struct Shown {
+    channel: String,
+    period: Period,
+    /// The first and newest reading, as the logs show times.
+    first: i64,
+    last: i64,
+}
+
+/// The period the address asks for, kept within the readings: the one
+/// holding its date, or the newest. `None` when there are no readings.
+fn shown(
+    conn: &rusqlite::Connection,
+    query: &GraphQuery,
+    offsets: &Offsets,
+) -> Result<Option<Shown>, PageError> {
+    let channels = graphs::channels(conn).map_err(internal)?;
+    let Some(channel) = pick_channel(&channels, filled(&query.channel)) else {
+        return Ok(None);
+    };
+    let Some((first, last)) = graphs::readings_extent(conn, &channel, offsets).map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    let date = query
+        .at()
+        .unwrap_or(date_of(last))
+        .clamp(date_of(first), date_of(last));
+    Ok(Some(Shown {
+        channel,
+        period: Period::containing(query.range(), date, first, last),
+        first,
+        last,
+    }))
 }
 
 /// The channel asked for, ignoring case, or the first with readings.
@@ -63,12 +109,15 @@ fn pick_channel(channels: &[String], asked: Option<&str>) -> Option<String> {
         .cloned()
 }
 
-/// What the page shows: a channel over a range, flagging faulty readings
-/// or not. Links keep what they do not change.
+/// What the page shows: a channel over the period of a range holding a
+/// date, or the newest, flagging faulty readings or not. Links keep what
+/// they do not change.
 #[derive(Clone, Copy)]
 struct View<'a> {
     channel: &'a str,
     range: Range,
+    /// `None` for the newest period.
+    at: Option<NaiveDate>,
     faults: bool,
 }
 
@@ -80,6 +129,9 @@ impl View<'_> {
             url_encode(self.channel),
             self.range.name()
         );
+        if let Some(at) = self.at {
+            query.push_str(&format!("&at={at}"));
+        }
         if !self.faults {
             query.push_str("&faults=hide");
         }
@@ -103,6 +155,27 @@ impl View<'_> {
     fn with_faults(self, faults: bool) -> Self {
         View { faults, ..self }
     }
+
+    fn at(self, at: Option<NaiveDate>) -> Self {
+        View { at, ..self }
+    }
+}
+
+/// What a period is, such as `Thursday, November 5, 2026`, `Week of
+/// November 2, 2026`, `November 2026` or `2026`.
+fn period_name(period: &Period) -> String {
+    let first = period.first_day();
+    match period.range {
+        Range::Day => first.format("%A, %B %-d, %Y").to_string(),
+        Range::Week => format!("Week of {}", first.format("%B %-d, %Y")),
+        Range::Month => first.format("%B %Y").to_string(),
+        Range::Year => first.format("%Y").to_string(),
+        Range::All => format!(
+            "Everything, {} to {}",
+            date_of(period.start),
+            date_of(period.end - 1)
+        ),
+    }
 }
 
 async fn sensors_page(
@@ -113,34 +186,33 @@ async fn sensors_page(
     with_db(&app, move |conn| {
         let channels = graphs::channels(conn).map_err(internal)?;
         let offsets = Offsets::load(conn).map_err(internal)?;
-        let channel = pick_channel(&channels, filled(&query.channel));
-        let range = query.range();
-        let graph = match &channel {
-            Some(channel) => {
-                Graph::build(conn, channel, range, &offsets, None).map_err(internal)?
-            }
-            None => None,
+        let Some(shown) = shown(conn, &query, &offsets)? else {
+            return Ok(layout::page("Sensors", &flash, page(&channels, None, None)));
         };
-        let title = match &channel {
-            Some(channel) => format!("Sensors in {channel}"),
-            None => "Sensors".to_string(),
-        };
-        let view = channel.as_deref().map(|channel| View {
-            channel,
-            range,
-            faults: query.faults(),
-        });
+        let graph =
+            Graph::build(conn, &shown.channel, &shown.period, &offsets, None).map_err(internal)?;
+        let title = format!("{} in {}", period_name(&shown.period), shown.channel);
         Ok(layout::page(
             &title,
             &flash,
-            page(&channels, view, graph.as_ref()),
+            page(
+                &channels,
+                Some((&shown, query.at(), query.faults())),
+                graph.as_ref(),
+            ),
         ))
     })
     .await
 }
 
-fn page(channels: &[String], view: Option<View<'_>>, graph: Option<&Graph>) -> Markup {
-    let Some(view) = view else {
+/// The page for a period: what is shown, the date the address asked for, if
+/// any, and whether faulty readings are flagged.
+fn page(
+    channels: &[String],
+    shown: Option<(&Shown, Option<NaiveDate>, bool)>,
+    graph: Option<&Graph>,
+) -> Markup {
+    let Some((shown, at, faults)) = shown else {
         return html! {
             h1 { "Sensors" }
             p {
@@ -149,7 +221,15 @@ fn page(channels: &[String], view: Option<View<'_>>, graph: Option<&Graph>) -> M
             }
         };
     };
-    let channel = view.channel;
+    let channel = shown.channel.as_str();
+    let period = &shown.period;
+    let view = View {
+        channel,
+        range: period.range,
+        at,
+        faults,
+    };
+    let holds_newest = period.end > shown.last;
     let faulty: usize = graph
         .iter()
         .flat_map(|graph| &graph.measures)
@@ -168,6 +248,9 @@ fn page(channels: &[String], view: Option<View<'_>>, graph: Option<&Graph>) -> M
             @if channels.len() > 1 {
                 form.inline method="get" action="/sensors" {
                     input type="hidden" name="range" value=(view.range.name());
+                    @if let Some(at) = view.at {
+                        input type="hidden" name="at" value=(at.to_string());
+                    }
                     @if !view.faults {
                         input type="hidden" name="faults" value="hide";
                     }
@@ -180,6 +263,21 @@ fn page(channels: &[String], view: Option<View<'_>>, graph: Option<&Graph>) -> M
                         }
                     }
                     button type="submit" { "Show" }
+                }
+            }
+            @if period.range != Range::All {
+                div.period role="group" aria-label="Period" {
+                    @match period.earlier(shown.first) {
+                        Some(date) => a href=(view.at(Some(date)).href()) rel="prev" { "← Earlier" },
+                        None => span.muted { "← Earlier" },
+                    }
+                    @match period.later(shown.last) {
+                        Some(date) => a href=(view.at(Some(date)).href()) rel="next" { "Later →" },
+                        None => span.muted { "Later →" },
+                    }
+                    @if !holds_newest {
+                        a href=(view.at(None).href()) { "Newest" }
+                    }
                 }
             }
             @if faulty > 0 || !view.faults {
@@ -196,8 +294,9 @@ fn page(channels: &[String], view: Option<View<'_>>, graph: Option<&Graph>) -> M
             }
         }
         @match graph {
-            None => p { "No readings in this range." },
+            None => p { "No readings in this period." },
             Some(graph) => {
+                h2.period-name { (period_name(period)) }
                 p.lead {
                     (time_text(graph.start, false)) " to " (time_text(graph.end, false))
                     ", as the logs show times."
@@ -223,7 +322,7 @@ fn page(channels: &[String], view: Option<View<'_>>, graph: Option<&Graph>) -> M
                 }
                 h2 { "Download" }
                 p {
-                    "CSV files of this range: "
+                    "CSV files of this period: "
                     a href=(view.csv_href("shown")) download { "the points shown" }
                     ", "
                     a href=(view.csv_href("hours")) download { "hourly points" }
@@ -260,14 +359,14 @@ fn summary(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
                 thead {
                     tr {
                         th { "Sensor" }
-                        th.num { "Latest" }
+                        th.num title="The last reading in this period" { "Last" }
                         th { "At" }
-                        th.num title="Over the range shown" { "Low" }
-                        th.num title="Over the range shown" { "Mean" }
-                        th.num title="Over the range shown" { "High" }
-                        th.num title="Over the range shown" { "Readings" }
+                        th.num title="Over the period shown" { "Low" }
+                        th.num title="Over the period shown" { "Mean" }
+                        th.num title="Over the period shown" { "High" }
+                        th.num title="Over the period shown" { "Readings" }
                         @if faults {
-                            th.num title="Left out, over the range shown" { "Faulty" }
+                            th.num title="Left out, over the period shown" { "Faulty" }
                         }
                     }
                 }
@@ -333,26 +432,26 @@ async fn download(
     Query(query): Query<GraphQuery>,
 ) -> Result<Response, PageError> {
     with_db(&app, move |conn| {
-        let channels = graphs::channels(conn).map_err(internal)?;
         let offsets = Offsets::load(conn).map_err(internal)?;
-        let channel = pick_channel(&channels, filled(&query.channel))
+        let Shown {
+            channel, period, ..
+        } = shown(conn, &query, &offsets)?
             .ok_or_else(|| PageError::not_found("There are no sensor readings yet."))?;
-        let range = query.range();
         let kind = filled(&query.points).unwrap_or("shown");
         let csv = match kind {
-            "shown" => Graph::build(conn, &channel, range, &offsets, None)
+            "shown" => Graph::build(conn, &channel, &period, &offsets, None)
                 .map_err(internal)?
                 .map(|graph| graphs::points_csv(&graph)),
-            "hours" => Graph::build(conn, &channel, range, &offsets, Some(HOUR))
+            "hours" => Graph::build(conn, &channel, &period, &offsets, Some(HOUR))
                 .map_err(internal)?
                 .map(|graph| graphs::points_csv(&graph)),
-            "readings" if !range.readings_downloadable() => {
+            "readings" if !period.range.readings_downloadable() => {
                 return Err(PageError::not_found(
                     "Every reading can be downloaded for a month or less. Choose a shorter \
-                     range, or the hourly points.",
+                     period, or the hourly points.",
                 ));
             }
-            "readings" => graphs::readings_csv(conn, &channel, range, &offsets, query.faults())
+            "readings" => graphs::readings_csv(conn, &channel, &period, &offsets, query.faults())
                 .map_err(internal)?,
             other => {
                 return Err(PageError::not_found(format!(
@@ -360,8 +459,16 @@ async fn download(
                 )));
             }
         };
-        let csv = csv.ok_or_else(|| PageError::not_found("No readings in this range."))?;
-        let filename = format!("{}-{}-{kind}.csv", file_stem(&channel), range.name());
+        let csv = csv.ok_or_else(|| PageError::not_found("No readings in this period."))?;
+        let when = match period.range {
+            Range::All => String::new(),
+            _ => format!("-{}", period.first_day()),
+        };
+        let filename = format!(
+            "{}-{}{when}-{kind}.csv",
+            file_stem(&channel),
+            period.range.name()
+        );
         Ok((
             [
                 (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
@@ -380,7 +487,11 @@ async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphs::{Fault, Line, Point};
+    use crate::graphs::{Fault, Line, Point, midnight};
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
 
     #[test]
     fn picks_a_channel_and_a_range() {
@@ -403,12 +514,27 @@ mod tests {
         let view = View {
             channel: "#greenhouse",
             range: Range::Day,
+            at: None,
             faults: true,
         };
         assert_eq!(
             view.csv_href("readings"),
             "/sensors.csv?channel=%23greenhouse&range=day&points=readings"
         );
+        assert_eq!(
+            view.at(Some(date(2026, 11, 2))).href(),
+            "/sensors?channel=%23greenhouse&range=day&at=2026-11-02"
+        );
+        let at = GraphQuery {
+            at: Some("2025-06-11".into()),
+            ..GraphQuery::default()
+        };
+        assert_eq!(at.at(), Some(date(2025, 6, 11)));
+        let bad = GraphQuery {
+            at: Some("June".into()),
+            ..GraphQuery::default()
+        };
+        assert_eq!(bad.at(), None);
         assert_eq!(
             view.with_faults(false).with_range(Range::Year).href(),
             "/sensors?channel=%23greenhouse&range=year&faults=hide"
@@ -421,6 +547,31 @@ mod tests {
         assert!(GraphQuery::default().faults());
         assert_eq!(file_stem("#greenhouse"), "greenhouse");
         assert_eq!(file_stem("#"), "sensors");
+    }
+
+    #[test]
+    fn names_periods() {
+        let at = |range, day| Period::containing(range, day, 0, midnight(date(2026, 11, 5)));
+        assert_eq!(
+            period_name(&at(Range::Day, date(2026, 11, 5))),
+            "Thursday, November 5, 2026"
+        );
+        assert_eq!(
+            period_name(&at(Range::Week, date(2026, 11, 5))),
+            "Week of November 2, 2026"
+        );
+        assert_eq!(
+            period_name(&at(Range::Month, date(2026, 11, 5))),
+            "November 2026"
+        );
+        assert_eq!(period_name(&at(Range::Year, date(2026, 11, 5))), "2026");
+        let all = Period::containing(
+            Range::All,
+            date(2026, 11, 5),
+            midnight(date(2025, 3, 9)),
+            midnight(date(2026, 11, 5)),
+        );
+        assert_eq!(period_name(&all), "Everything, 2025-03-09 to 2026-11-05");
     }
 
     #[test]
@@ -462,12 +613,21 @@ mod tests {
             }],
         };
         let channels = ["#greenhouse".to_string()];
-        let view = View {
-            channel: "#greenhouse",
-            range: Range::Year,
-            faults: true,
+        let (first_reading, last_reading) = (midnight(date(2025, 3, 9)), second);
+        let shown = Shown {
+            channel: "#greenhouse".into(),
+            period: Period::containing(Range::Year, date(2026, 11, 4), first_reading, last_reading),
+            first: first_reading,
+            last: last_reading,
         };
-        let html = page(&channels, Some(view), Some(&graph)).into_string();
+        let html = page(&channels, Some((&shown, None, true)), Some(&graph)).into_string();
+        assert!(html.contains(r#"<h2 class="period-name">2026</h2>"#));
+        assert!(html.contains(
+            r#"<a href="/sensors?channel=%23greenhouse&amp;range=year&amp;at=2025-12-31" rel="prev">← Earlier</a>"#
+        ));
+        assert!(html.contains(r#"<span class="muted">Later →</span>"#));
+        assert!(!html.contains(">Newest<"), "the newest period is shown");
+        assert!(html.contains(r#"title="The last reading in this period">Last</th>"#));
         assert!(html.contains("<h1>Sensors in #greenhouse</h1>"));
         assert!(html.contains(r#"<a href="/sensors?channel=%23greenhouse&amp;range=year" aria-current="page">Year</a>"#));
         assert!(html.contains(r#"<a href="/sensors?channel=%23greenhouse&amp;range=day">Day</a>"#));
@@ -494,7 +654,7 @@ mod tests {
         );
         assert!(html.contains("fault top"));
 
-        let hidden = page(&channels, Some(view.with_faults(false)), Some(&graph)).into_string();
+        let hidden = page(&channels, Some((&shown, None, false)), Some(&graph)).into_string();
         assert!(hidden.contains("Faulty readings are hidden."));
         assert!(hidden.contains(
             r#"<a href="/sensors?channel=%23greenhouse&amp;range=day&amp;faults=hide">Day</a>"#
@@ -502,6 +662,28 @@ mod tests {
         assert!(!hidden.contains("Faulty</th>"));
         assert!(!hidden.contains("fault top"));
         assert!(hidden.contains("points=hours"));
+
+        // A week in the past, with the newest a link away.
+        let june = Shown {
+            period: Period::containing(Range::Week, date(2025, 6, 11), first_reading, last_reading),
+            ..shown
+        };
+        let past = page(
+            &channels,
+            Some((&june, Some(date(2025, 6, 11)), true)),
+            Some(&graph),
+        )
+        .into_string();
+        assert!(past.contains(r#"<h2 class="period-name">Week of June 9, 2025</h2>"#));
+        assert!(past.contains(
+            r#"href="/sensors?channel=%23greenhouse&amp;range=week&amp;at=2025-06-16" rel="next">Later →</a>"#
+        ));
+        assert!(
+            past.contains(r#"<a href="/sensors?channel=%23greenhouse&amp;range=week">Newest</a>"#)
+        );
+        assert!(past.contains(
+            r#"<a href="/sensors?channel=%23greenhouse&amp;range=month&amp;at=2025-06-11">Month</a>"#
+        ));
 
         let none = page(&[], None, None).into_string();
         assert!(none.contains("No sensor readings yet."));

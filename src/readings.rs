@@ -231,6 +231,8 @@ pub fn build_with_progress(
             |row| row.get(0),
         )
         .optional()?;
+    // Again, when something was built before and is read once more.
+    let again = full && state.is_some();
     let full = full || state.is_none();
     let last: i64 = if full {
         tx.execute_batch(
@@ -251,7 +253,7 @@ pub fn build_with_progress(
         row.get(0)
     })?;
 
-    let label = if full {
+    let label = if again {
         "Reading sensor lines again"
     } else {
         "Reading sensor lines"
@@ -506,8 +508,9 @@ impl Builder {
                 self.touched.insert((series, at.div_euclid(HOUR)));
             }
         }
-        self.summary.faults =
+        let faults: i64 =
             tx.query_row("SELECT count(*) FROM reading_faults", [], |row| row.get(0))?;
+        self.summary.faults = u64::try_from(faults)?;
         Ok(())
     }
 

@@ -181,20 +181,20 @@ mod tests {
     fn leaves_changes_that_last_alone() {
         // A heater turning on: the readings after the jump agree with it.
         let step = every_30s(&[60.0, 60.1, 75.0, 75.2, 75.1, 75.3]);
-        assert_eq!(found(&step), []);
+        assert!(found(&step).is_empty());
         // Small wobbles are not spikes.
         let wobble = every_30s(&[67.0, 70.0, 66.0, 71.0, 67.0]);
-        assert_eq!(found(&wobble), []);
+        assert!(found(&wobble).is_empty());
         // The newest reading waits for a neighbor after it.
         let newest = every_30s(&[67.4, 67.5, 95.0]);
-        assert_eq!(found(&newest), []);
+        assert!(found(&newest).is_empty());
     }
 
     #[test]
     fn needs_neighbors_close_in_time() {
         // Ten minutes on each side: no neighbors, so no spike.
         let apart = [(0, 67.0), (600_000, 95.0), (1_200_000, 67.0)];
-        assert_eq!(found(&apart), []);
+        assert!(found(&apart).is_empty());
     }
 
     #[test]

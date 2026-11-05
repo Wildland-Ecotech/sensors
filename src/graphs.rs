@@ -1,12 +1,13 @@
-//! Graphs: one channel's readings over a range of time, averaged into
-//! points, and the same as CSV.
+//! Graphs: one channel's readings over a calendar period, averaged into
+//! points, and the same as CSV. A period is a day, a Monday to Sunday week,
+//! a month or a year, as the logs show times, or everything.
 //!
 //! Every nick that posted to a channel counts as the same device, since a
 //! device that reconnects often comes back under a fallback nick such as
 //! `greenhouse1`. So a line is one measure from one sensor, every nick
 //! together: the inside temperature, say.
 //!
-//! A range is cut into points of one size, the smallest that keeps a line
+//! A period is cut into points of one size, the smallest that keeps a line
 //! under `MAX_POINTS`. Points under an hour average the readings themselves,
 //! leaving out a second copy of a reading posted under two nicks at the same
 //! moment. Points of an hour or more add up the hourly rows in
@@ -23,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use chrono::DateTime;
+use chrono::{DateTime, Datelike, Days, Months, NaiveDate, NaiveTime};
 use rusqlite::types::Value;
 use rusqlite::{Connection, params, params_from_iter};
 
@@ -52,11 +53,8 @@ const POINT_SIZES: [i64; 11] = [
     7 * DAY,
 ];
 
-/// The longest range every reading can be downloaded for, as a CSV file
-/// held in memory: about 350,000 rows for a month of the greenhouse.
-pub const MAX_READINGS_SPAN: i64 = 31 * DAY;
-
-/// How much time a graph shows, ending at the newest reading.
+/// How much time a graph shows: a calendar day, week, month or year, or
+/// everything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Range {
     Day,
@@ -100,20 +98,80 @@ impl Range {
         }
     }
 
-    /// How long it is, or `None` for everything.
-    pub fn span(self) -> Option<i64> {
-        match self {
-            Range::Day => Some(DAY),
-            Range::Week => Some(7 * DAY),
-            Range::Month => Some(30 * DAY),
-            Range::Year => Some(365 * DAY),
-            Range::All => None,
+    /// Whether every reading in it can be downloaded, as a CSV file held in
+    /// memory: about 350,000 rows for a month of the greenhouse.
+    pub fn readings_downloadable(self) -> bool {
+        matches!(self, Range::Day | Range::Week | Range::Month)
+    }
+}
+
+/// A calendar period of a range, as the logs show times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Period {
+    pub range: Range,
+    /// When it starts, and when the next one starts.
+    pub start: i64,
+    pub end: i64,
+}
+
+/// Midnight at the start of a date, as the logs show times.
+pub fn midnight(date: NaiveDate) -> i64 {
+    date.and_time(NaiveTime::MIN).and_utc().timestamp_millis()
+}
+
+/// The date of a time, as the logs show times.
+pub fn date_of(at: i64) -> NaiveDate {
+    DateTime::from_timestamp_millis(at)
+        .unwrap_or_default()
+        .date_naive()
+}
+
+impl Period {
+    /// The period of `range` that holds `date`. For everything, the
+    /// readings' first and last times, as the logs show them.
+    pub fn containing(range: Range, date: NaiveDate, first: i64, last: i64) -> Period {
+        let (start, end) = match range {
+            Range::Day => (date, date + Days::new(1)),
+            Range::Week => {
+                let monday = date - Days::new(u64::from(date.weekday().num_days_from_monday()));
+                (monday, monday + Days::new(7))
+            }
+            Range::Month => {
+                let first = date.with_day(1).unwrap_or(date);
+                (first, first + Months::new(1))
+            }
+            Range::Year => {
+                let first = NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date);
+                (first, first + Months::new(12))
+            }
+            Range::All => {
+                return Period {
+                    range,
+                    start: first,
+                    end: last + 1,
+                };
+            }
+        };
+        Period {
+            range,
+            start: midnight(start),
+            end: midnight(end),
         }
     }
 
-    /// Whether every reading in it can be downloaded.
-    pub fn readings_downloadable(self) -> bool {
-        self.span().is_some_and(|span| span <= MAX_READINGS_SPAN)
+    /// The day it starts on.
+    pub fn first_day(&self) -> NaiveDate {
+        date_of(self.start)
+    }
+
+    /// A date in the period before, when readings go back that far.
+    pub fn earlier(&self, first: i64) -> Option<NaiveDate> {
+        (self.range != Range::All && self.start > first).then(|| date_of(self.start - 1))
+    }
+
+    /// A date in the period after, when readings go on that far.
+    pub fn later(&self, last: i64) -> Option<NaiveDate> {
+        (self.range != Range::All && self.end <= last).then(|| date_of(self.end))
     }
 }
 
@@ -208,22 +266,32 @@ fn extent(conn: &Connection, groups: &[Group]) -> Result<Option<(i64, i64)>> {
     Ok(extent)
 }
 
-/// The UTC stretch a range covers: the range up to the newest reading, or
-/// everything.
-fn window(conn: &Connection, groups: &[Group], range: Range) -> Result<Option<(i64, i64)>> {
-    let Some((first, last)) = extent(conn, groups)? else {
-        return Ok(None);
-    };
-    let start = match range.span() {
-        Some(span) => last - span,
-        None => first,
-    };
-    Ok(Some((start, last)))
+/// The first and newest reading in a channel, as the logs show times.
+pub fn readings_extent(
+    conn: &Connection,
+    channel: &str,
+    offsets: &Offsets,
+) -> Result<Option<(i64, i64)>> {
+    let groups = groups(conn, channel)?;
+    Ok(extent(conn, &groups)?.map(|(first, last)| (local(offsets, first), local(offsets, last))))
 }
 
 /// A time in milliseconds since 1970 UTC, as the logs show it.
 fn local(offsets: &Offsets, at: i64) -> i64 {
     at + offsets.minutes_at(at) * MINUTE
+}
+
+/// A time as the logs show it, in milliseconds since 1970 UTC. The offset
+/// is looked up twice, the second time at the UTC time the first gave, to
+/// be right on either side of a daylight saving change.
+fn utc(offsets: &Offsets, local: i64) -> i64 {
+    let guess = local - offsets.minutes_at(local) * MINUTE;
+    local - offsets.minutes_at(guess) * MINUTE
+}
+
+/// A period's stretch in milliseconds since 1970 UTC, both ends included.
+fn utc_window(offsets: &Offsets, period: &Period) -> (i64, i64) {
+    (utc(offsets, period.start), utc(offsets, period.end) - 1)
 }
 
 /// Leaves out the faulty readings of `readings r`.
@@ -285,16 +353,16 @@ fn faulty(
     Ok(rows)
 }
 
-/// The most recent reading of a group that is not faulty, as its time in
-/// milliseconds since 1970 UTC and its value.
-fn latest(conn: &Connection, group: &Group) -> Result<Option<(i64, f64)>> {
+/// The last reading of a group up to `end` that is not faulty, as its time
+/// in milliseconds since 1970 UTC and its value.
+fn latest(conn: &Connection, group: &Group, end: i64) -> Result<Option<(i64, f64)>> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT at, value FROM readings r WHERE series_id = ?1 AND {NOT_FAULTY}
+        "SELECT at, value FROM readings r WHERE series_id = ?1 AND at <= ?2 AND {NOT_FAULTY}
          ORDER BY at DESC LIMIT 1"
     ))?;
     let mut latest: Option<(i64, f64)> = None;
     for id in &group.ids {
-        let mut rows = stmt.query(params![id])?;
+        let mut rows = stmt.query(params![id, end])?;
         if let Some(row) = rows.next()? {
             let found: (i64, f64) = (row.get(0)?, row.get(1)?);
             if latest.is_none_or(|(at, _)| found.0 > at) {
@@ -348,7 +416,8 @@ pub struct Line {
     pub points: Vec<Point>,
     /// The faulty readings over the range, oldest first.
     pub faults: Vec<Fault>,
-    /// The most recent reading ever, as the logs show its time, and its value.
+    /// The last reading in the period that is not faulty, as the logs show
+    /// its time, and its value.
     pub latest: Option<(i64, f64)>,
 }
 
@@ -371,10 +440,11 @@ pub struct Measure {
     pub lines: Vec<Line>,
 }
 
-/// A channel's readings over a range.
+/// A channel's readings over a period.
 #[derive(Debug)]
 pub struct Graph {
-    /// When the range starts and ends, as the logs show times.
+    /// When the period starts, and when the next one starts, as the logs
+    /// show times.
     pub start: i64,
     pub end: i64,
     /// How long each point is, in milliseconds.
@@ -386,20 +456,22 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// A channel's graph over a range, with points of `point_size`, or of
-    /// the size the range calls for. `None` when it has no readings.
+    /// A channel's graph over a period, with points of `point_size`, or of
+    /// the size the period calls for. `None` when the channel has no
+    /// readings at all.
     pub fn build(
         conn: &Connection,
         channel: &str,
-        range: Range,
+        period: &Period,
         offsets: &Offsets,
         point_size: Option<i64>,
     ) -> Result<Option<Graph>> {
         let groups = groups(conn, channel)?;
-        let Some((start, end)) = window(conn, &groups, range)? else {
+        if groups.is_empty() {
             return Ok(None);
-        };
-        let size = point_size.unwrap_or_else(|| self::point_size(end - start));
+        }
+        let (start, end) = utc_window(offsets, period);
+        let size = point_size.unwrap_or_else(|| self::point_size(period.end - period.start));
         let bucket = |at: i64| local(offsets, at).div_euclid(size) * size;
 
         let mut sensors: Vec<String> = groups.iter().map(|group| group.sensor.clone()).collect();
@@ -457,7 +529,7 @@ impl Graph {
                 sensor: group.sensor.clone(),
                 points: points.into_values().collect(),
                 faults,
-                latest: latest(conn, group)?.map(|(at, value)| (local(offsets, at), value)),
+                latest: latest(conn, group, end)?.map(|(at, value)| (local(offsets, at), value)),
             };
             let same = measures
                 .last()
@@ -474,8 +546,8 @@ impl Graph {
             }
         }
         Ok(Some(Graph {
-            start: local(offsets, start),
-            end: local(offsets, end),
+            start: period.start,
+            end: period.end,
             point_size: size,
             sensors,
             measures,
@@ -553,24 +625,26 @@ pub fn points_csv(graph: &Graph) -> String {
     csv
 }
 
-/// Every reading of a channel over a range as CSV, oldest first: its time as
+/// Every reading of a channel over a period as CSV, oldest first: its time as
 /// the logs show it and in UTC, its sensor, measure and value, and why it is
 /// faulty, if it is. Faulty readings are left out unless `faults` is set.
-/// `None` when the range is too long to hold in memory, or has no readings.
+/// `None` when the period is too long to hold in memory, or the channel has
+/// no readings.
 pub fn readings_csv(
     conn: &Connection,
     channel: &str,
-    range: Range,
+    period: &Period,
     offsets: &Offsets,
     faults: bool,
 ) -> Result<Option<String>> {
-    if !range.readings_downloadable() {
+    if !period.range.readings_downloadable() {
         return Ok(None);
     }
     let groups = groups(conn, channel)?;
-    let Some((start, end)) = window(conn, &groups, range)? else {
+    if groups.is_empty() {
         return Ok(None);
-    };
+    }
+    let (start, end) = utc_window(offsets, period);
     let mut rows: Vec<(i64, usize, &Group, f64, String)> = Vec::new();
     for (order, group) in groups.iter().enumerate() {
         for (at, value) in readings(conn, group, start, end)? {
@@ -582,7 +656,7 @@ pub fn readings_csv(
             }
         }
     }
-    rows.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    rows.sort_by_key(|row| (row.0, row.1));
     let mut csv = String::from("time,utc,sensor,measure,value,fault\n");
     for (at, _, group, value, reason) in rows {
         let utc = DateTime::from_timestamp_millis(at)
@@ -645,6 +719,55 @@ mod tests {
             .collect()
     }
 
+    fn day(month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, month, day).unwrap()
+    }
+
+    /// The period of a range holding 2026-11-03.
+    fn period(range: Range) -> Period {
+        Period::containing(range, day(11, 3), 0, 0)
+    }
+
+    #[test]
+    fn finds_calendar_periods_and_their_neighbors() {
+        let span = |period: Period| {
+            format!(
+                "{} to {}",
+                time_text(period.start, false),
+                time_text(period.end, false)
+            )
+        };
+        // Thursday 2026-11-05.
+        let (first, last) = (midnight(day(3, 9)), midnight(day(11, 5)) + 13 * HOUR);
+        let at = |range| Period::containing(range, day(11, 5), first, last);
+        assert_eq!(span(at(Range::Day)), "2026-11-05 00:00 to 2026-11-06 00:00");
+        assert_eq!(
+            span(at(Range::Week)),
+            "2026-11-02 00:00 to 2026-11-09 00:00"
+        );
+        assert_eq!(
+            span(at(Range::Month)),
+            "2026-11-01 00:00 to 2026-12-01 00:00"
+        );
+        assert_eq!(
+            span(at(Range::Year)),
+            "2026-01-01 00:00 to 2027-01-01 00:00"
+        );
+        assert_eq!(span(at(Range::All)), "2026-03-09 00:00 to 2026-11-05 13:00");
+        assert_eq!(at(Range::Week).first_day(), day(11, 2));
+
+        // Earlier and later, as far as the readings go.
+        assert_eq!(at(Range::Week).earlier(first), Some(day(11, 1)));
+        assert_eq!(at(Range::Week).later(last), None);
+        assert_eq!(at(Range::Month).earlier(first), Some(day(10, 31)));
+        let march = Period::containing(Range::Month, day(3, 20), first, last);
+        assert_eq!(march.earlier(first), None);
+        assert_eq!(march.later(last), Some(day(4, 1)));
+        assert_eq!(at(Range::Year).earlier(first), None);
+        assert_eq!(at(Range::All).earlier(first), None);
+        assert_eq!(at(Range::All).later(last), None);
+    }
+
     #[test]
     fn picks_point_sizes_for_each_range() {
         assert_eq!(point_size(DAY), 2 * MINUTE);
@@ -663,12 +786,17 @@ mod tests {
     fn merges_nicks_into_one_line_per_sensor() {
         let (_root, conn, offsets) = setup("graphs-day");
         assert_eq!(channels(&conn).unwrap(), ["#greenhouse"]);
-        let graph = Graph::build(&conn, "#GREENHOUSE", Range::Day, &offsets, None)
+        let graph = Graph::build(&conn, "#GREENHOUSE", &period(Range::Day), &offsets, None)
             .unwrap()
             .unwrap();
         assert_eq!(graph.point_size, 2 * MINUTE);
-        assert_eq!(time_text(graph.end, true), "2026-11-03 15:10:00");
-        assert_eq!(time_text(graph.start, true), "2026-11-02 15:10:00");
+        assert_eq!(time_text(graph.start, true), "2026-11-03 00:00:00");
+        assert_eq!(time_text(graph.end, true), "2026-11-04 00:00:00");
+        let (first, last) = readings_extent(&conn, "#greenhouse", &offsets)
+            .unwrap()
+            .unwrap();
+        assert_eq!(time_text(first, true), "2026-11-03 13:46:42");
+        assert_eq!(time_text(last, true), "2026-11-03 15:10:00");
         assert_eq!(graph.sensors, ["inside", "outside"]);
 
         let measures: Vec<&str> = graph.measures.iter().map(|m| m.measure.as_str()).collect();
@@ -708,7 +836,7 @@ mod tests {
     #[test]
     fn adds_up_hours_for_long_ranges() {
         let (_root, conn, offsets) = setup("graphs-year");
-        let graph = Graph::build(&conn, "#greenhouse", Range::Year, &offsets, None)
+        let graph = Graph::build(&conn, "#greenhouse", &period(Range::Year), &offsets, None)
             .unwrap()
             .unwrap();
         assert_eq!(graph.point_size, 12 * HOUR);
@@ -717,9 +845,15 @@ mod tests {
             points(&graph.measures[0].lines[0]),
             ["2026-11-03 12:00 4 68.815 68.36 70"]
         );
-        let hourly = Graph::build(&conn, "#greenhouse", Range::Year, &offsets, Some(HOUR))
-            .unwrap()
-            .unwrap();
+        let hourly = Graph::build(
+            &conn,
+            "#greenhouse",
+            &period(Range::Year),
+            &offsets,
+            Some(HOUR),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             points(&hourly.measures[0].lines[0]),
             [
@@ -728,7 +862,7 @@ mod tests {
             ]
         );
         assert!(
-            Graph::build(&conn, "#nowhere", Range::Day, &offsets, None)
+            Graph::build(&conn, "#nowhere", &period(Range::Day), &offsets, None)
                 .unwrap()
                 .is_none()
         );
@@ -737,7 +871,7 @@ mod tests {
     #[test]
     fn writes_points_and_readings_as_csv() {
         let (_root, conn, offsets) = setup("graphs-csv");
-        let graph = Graph::build(&conn, "#greenhouse", Range::Day, &offsets, None)
+        let graph = Graph::build(&conn, "#greenhouse", &period(Range::Day), &offsets, None)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -751,7 +885,7 @@ mod tests {
              2026-11-03 15:10,inside,humid,1,30,30,30\n"
         );
         assert_eq!(
-            readings_csv(&conn, "#greenhouse", Range::Day, &offsets, true)
+            readings_csv(&conn, "#greenhouse", &period(Range::Day), &offsets, true)
                 .unwrap()
                 .unwrap(),
             "time,utc,sensor,measure,value,fault\n\
@@ -765,7 +899,7 @@ mod tests {
              2026-11-03 15:10:00,2026-11-03T22:10:00.000Z,inside,humid,30,\n"
         );
         assert_eq!(
-            readings_csv(&conn, "#greenhouse", Range::Year, &offsets, true).unwrap(),
+            readings_csv(&conn, "#greenhouse", &period(Range::Year), &offsets, true).unwrap(),
             None
         );
         assert_eq!(csv_field("a,b"), "\"a,b\"");
@@ -788,7 +922,7 @@ mod tests {
         readings::build(&mut conn, false).unwrap();
         let offsets = Offsets::load(&conn).unwrap();
 
-        let graph = Graph::build(&conn, "#greenhouse", Range::Day, &offsets, None)
+        let graph = Graph::build(&conn, "#greenhouse", &period(Range::Day), &offsets, None)
             .unwrap()
             .unwrap();
         let inside = &graph.measures[0].lines[0];
@@ -804,13 +938,13 @@ mod tests {
         );
         assert_eq!(time_text(inside.faults[0].at, false), "2026-11-03 15:11");
 
-        let with = readings_csv(&conn, "#greenhouse", Range::Day, &offsets, true)
+        let with = readings_csv(&conn, "#greenhouse", &period(Range::Day), &offsets, true)
             .unwrap()
             .unwrap();
         assert!(
             with.ends_with("2026-11-03 15:11:00,2026-11-03T22:11:00.000Z,inside,temp,302,range\n")
         );
-        let without = readings_csv(&conn, "#greenhouse", Range::Day, &offsets, false)
+        let without = readings_csv(&conn, "#greenhouse", &period(Range::Day), &offsets, false)
             .unwrap()
             .unwrap();
         assert!(!without.contains("302"));
