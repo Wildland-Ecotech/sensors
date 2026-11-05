@@ -28,8 +28,21 @@ to 5 seconds for another one to finish.
 | --- | --- | --- |
 | `files` | log file | `path`, `tag` (its network tag folder), `target`, `kind` (`channel` or `query`), how far it was read |
 | `events` | log line | `file_id`, `line`, `date`, `time`, `kind`, `nick`, `ident`, `host`, `other_nick`, `text`, `detail` |
+| `sensor_series` | measure of a sensor | `id`, `tag`, `channel`, `nick`, `sensor` (`''` when the lines have none), `measure` |
+| `readings` | reading | `series_id`, `at`, `value` |
+| `reading_hours` | series and hour | `series_id`, `hour`, `readings`, `total` (their sum), `low`, `high` |
+| `reading_markers` | JSON line without readings | `tag`, `channel`, `nick`, `at`, `text` |
+| `log_offsets` | hour and UTC offset | `hour`, `minutes` (ahead of UTC, such as `-420`), `lines` seen with it |
+| `reading_state` | (one row) | `last_event_id`, the last event read for readings |
 
-Dates are `YYYY-MM-DD` and times `HH:MM`, in the logs' own time zone. A
+The reading tables are built from the events after each import, as
+[Readings](readings.md) describes. `at` is milliseconds since 1970 UTC, and
+`hour` is hours since 1970 UTC, `at / 3600000`. A mean over any stretch of
+hours is `sum(total) / sum(readings)`.
+
+## Events
+
+In `events`, dates are `YYYY-MM-DD` and times `HH:MM`, in the logs' own time zone. A
 sensor's JSON is the `text` of a `message` event. Which event columns are
 filled depends on its `kind`:
 

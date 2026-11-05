@@ -19,7 +19,6 @@ const LOG_INTERVAL: Duration = Duration::from_secs(10);
 pub enum Unit {
     Bytes,
     /// Things, by their plural name, such as `events`.
-    #[allow(dead_code)]
     Items(&'static str),
 }
 

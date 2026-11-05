@@ -8,6 +8,9 @@
 //!
 //! The importer comes from wot, the web of trust tools for IRC communities,
 //! without wot's networks.
+//!
+//! The reading tables are filled by the `readings` module, and built again
+//! from the events whenever needed.
 
 use std::error::Error;
 use std::fs::{self, File};
@@ -34,7 +37,7 @@ const HEAD_LEN: u64 = 1024;
 /// The schema, as the steps that build it. SQLite's `user_version` stores how
 /// many steps a database has had, so an older database is brought up to date
 /// by running the steps it is missing.
-const MIGRATIONS: [&str; 1] = [SCHEMA_V1];
+const MIGRATIONS: [&str; 2] = [SCHEMA_V1, SCHEMA_V2];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE files (
@@ -78,6 +81,82 @@ CREATE TABLE events (
 
 CREATE INDEX events_by_file_date ON events (file_id, date);
 CREATE INDEX events_by_file_line ON events (file_id, line);
+";
+
+const SCHEMA_V2: &str = "
+-- Readings, built from the JSON lines sensors post, after each import. The
+-- readings module describes how. Everything here can be built again from
+-- the events.
+
+-- Each measure from each sensor, as its lines name them.
+CREATE TABLE sensor_series (
+    id INTEGER PRIMARY KEY,
+    -- The network tag folder and channel of the log file.
+    tag TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    -- The nick that posted the lines.
+    nick TEXT NOT NULL,
+    -- The lines' sensor field, or '' when they have none.
+    sensor TEXT NOT NULL,
+    -- The field holding the value, such as 'temp'.
+    measure TEXT NOT NULL,
+    UNIQUE (tag, channel, nick, sensor, measure)
+);
+
+-- One value of one measure. A second value at the same time is left out.
+CREATE TABLE readings (
+    series_id INTEGER NOT NULL REFERENCES sensor_series (id),
+    -- The line's timestamp, in milliseconds since 1970 UTC.
+    at INTEGER NOT NULL,
+    value REAL NOT NULL,
+    PRIMARY KEY (series_id, at)
+) WITHOUT ROWID;
+
+-- The readings of each measure in each hour, so graphs of long stretches
+-- read a row an hour.
+CREATE TABLE reading_hours (
+    series_id INTEGER NOT NULL REFERENCES sensor_series (id),
+    -- Hours since 1970 UTC: at / 3600000.
+    hour INTEGER NOT NULL,
+    readings INTEGER NOT NULL,
+    -- The sum of the values, for the mean over any stretch of hours.
+    total REAL NOT NULL,
+    low REAL NOT NULL,
+    high REAL NOT NULL,
+    PRIMARY KEY (series_id, hour)
+) WITHOUT ROWID;
+
+-- JSON lines with a timestamp and no readings, such as testBegin.
+CREATE TABLE reading_markers (
+    id INTEGER PRIMARY KEY,
+    tag TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    nick TEXT NOT NULL,
+    -- The line's timestamp, in milliseconds since 1970 UTC.
+    at INTEGER NOT NULL,
+    -- The whole JSON line.
+    text TEXT NOT NULL,
+    UNIQUE (tag, channel, nick, at, text)
+);
+
+CREATE INDEX reading_markers_by_time ON reading_markers (at);
+
+-- The logs' UTC offset, from the difference between each line's timestamp
+-- and the time irssi logged it: how many lines in each hour had each offset.
+CREATE TABLE log_offsets (
+    -- Hours since 1970 UTC.
+    hour INTEGER NOT NULL,
+    -- Minutes the logs are ahead of UTC, such as -420 for UTC-7.
+    minutes INTEGER NOT NULL,
+    lines INTEGER NOT NULL,
+    PRIMARY KEY (hour, minutes)
+) WITHOUT ROWID;
+
+-- The last event read for readings, so the next build reads only newer ones.
+CREATE TABLE reading_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_event_id INTEGER NOT NULL
+);
 ";
 
 const INSERT_EVENT: &str = "
@@ -673,6 +752,34 @@ mod tests {
                 "2 2026-11-05 09:00 message greenhouse",
             ]
         );
+    }
+
+    #[test]
+    fn upgrades_an_older_database() {
+        let root = TempDir::new("db-upgrade");
+        let path = root.0.join("sensors.sqlite");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!("{SCHEMA_V1} PRAGMA user_version = 1;"))
+            .unwrap();
+
+        let conn = open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        let rows: i64 = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM sensor_series) + (SELECT count(*) FROM readings)
+                        + (SELECT count(*) FROM reading_hours)
+                        + (SELECT count(*) FROM reading_markers)
+                        + (SELECT count(*) FROM log_offsets)
+                        + (SELECT count(*) FROM reading_state)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]

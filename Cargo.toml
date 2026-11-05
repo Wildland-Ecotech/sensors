@@ -11,3 +11,4 @@ license-file = "LICENSE"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.6", features = ["derive"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+serde_json = "1.0"

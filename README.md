@@ -16,8 +16,9 @@ database.
 
 ## Status
 
-Early development. It imports irssi logs into the database. Next are the
-readings in those lines, then a web interface with graphs of them.
+Early development. It imports irssi logs into the database, reads the
+sensor readings in them, and lists each sensor's measures. Next is a web
+interface with graphs of them.
 
 ## Install
 
@@ -39,12 +40,22 @@ sensors analyze ~/irclogs
 ```
 
 The first run imports everything and can take a while for years of logs; it
-shows each step as it goes. Later runs only read the lines added since.
+shows each step as it goes. Later runs only read the lines added since. Each
+run reads the readings in the new lines and ends with a list of every
+sensor's measures:
+
+```text
+Channel      Nick        Sensor   Measure  Readings  From and to
+#greenhouse  greenhouse  inside   humid       2,864  2026-11-03 13:46 to 2026-11-04 18:06
+#greenhouse  greenhouse  inside   temp        2,864  2026-11-03 13:46 to 2026-11-04 18:06
+```
 
 ## Documentation
 
 - [Logs and importing](docs/logs.md): the log layout `sensors` expects and
   how importing works.
+- [Readings](docs/readings.md): which JSON lines are readings, markers, time
+  zones and rebuilding.
 - [Database](docs/database.md): the tables, for querying them or working on
   `sensors`.
 
