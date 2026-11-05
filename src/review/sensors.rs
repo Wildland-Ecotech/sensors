@@ -1,6 +1,8 @@
 //! The sensors page: a chart of each measure over a range, every nick in the
 //! channel together, with a table of each sensor's latest reading and its
-//! lowest, mean and highest over the range, and CSV downloads of it.
+//! lowest, mean and highest over the range, and CSV downloads of it. Faulty
+//! readings are left out of all of them, and flagged unless the address says
+//! `faults=hide`.
 
 use axum::Router;
 use axum::extract::{Query, State};
@@ -32,6 +34,8 @@ struct GraphQuery {
     range: Option<String>,
     /// For a download: `shown`, `hours` or `readings`.
     points: Option<String>,
+    /// `hide` to hide faulty readings.
+    faults: Option<String>,
 }
 
 impl GraphQuery {
@@ -39,6 +43,11 @@ impl GraphQuery {
         filled(&self.range)
             .and_then(Range::parse)
             .unwrap_or(DEFAULT_RANGE)
+    }
+
+    /// Whether to flag faulty readings.
+    fn faults(&self) -> bool {
+        filled(&self.faults) != Some("hide")
     }
 }
 
@@ -54,22 +63,46 @@ fn pick_channel(channels: &[String], asked: Option<&str>) -> Option<String> {
         .cloned()
 }
 
-/// The address of a channel's sensors over a range.
-fn href(channel: &str, range: Range) -> String {
-    format!(
-        "/sensors?channel={}&range={}",
-        url_encode(channel),
-        range.name()
-    )
+/// What the page shows: a channel over a range, flagging faulty readings
+/// or not. Links keep what they do not change.
+#[derive(Clone, Copy)]
+struct View<'a> {
+    channel: &'a str,
+    range: Range,
+    faults: bool,
 }
 
-/// The address of a download.
-fn csv_href(channel: &str, range: Range, points: &str) -> String {
-    format!(
-        "/sensors.csv?channel={}&range={}&points={points}",
-        url_encode(channel),
-        range.name()
-    )
+impl View<'_> {
+    /// The query for this view, after `?`.
+    fn query(&self) -> String {
+        let mut query = format!(
+            "channel={}&range={}",
+            url_encode(self.channel),
+            self.range.name()
+        );
+        if !self.faults {
+            query.push_str("&faults=hide");
+        }
+        query
+    }
+
+    /// The address of the page.
+    fn href(&self) -> String {
+        format!("/sensors?{}", self.query())
+    }
+
+    /// The address of a download.
+    fn csv_href(&self, points: &str) -> String {
+        format!("/sensors.csv?{}&points={points}", self.query())
+    }
+
+    fn with_range(self, range: Range) -> Self {
+        View { range, ..self }
+    }
+
+    fn with_faults(self, faults: bool) -> Self {
+        View { faults, ..self }
+    }
 }
 
 async fn sensors_page(
@@ -92,17 +125,22 @@ async fn sensors_page(
             Some(channel) => format!("Sensors in {channel}"),
             None => "Sensors".to_string(),
         };
+        let view = channel.as_deref().map(|channel| View {
+            channel,
+            range,
+            faults: query.faults(),
+        });
         Ok(layout::page(
             &title,
             &flash,
-            page(&channels, channel.as_deref(), range, graph.as_ref()),
+            page(&channels, view, graph.as_ref()),
         ))
     })
     .await
 }
 
-fn page(channels: &[String], channel: Option<&str>, range: Range, graph: Option<&Graph>) -> Markup {
-    let Some(channel) = channel else {
+fn page(channels: &[String], view: Option<View<'_>>, graph: Option<&Graph>) -> Markup {
+    let Some(view) = view else {
         return html! {
             h1 { "Sensors" }
             p {
@@ -111,18 +149,28 @@ fn page(channels: &[String], channel: Option<&str>, range: Range, graph: Option<
             }
         };
     };
+    let channel = view.channel;
+    let faulty: usize = graph
+        .iter()
+        .flat_map(|graph| &graph.measures)
+        .flat_map(|measure| &measure.lines)
+        .map(|line| line.faults.len())
+        .sum();
     html! {
         h1 { "Sensors in " (channel) }
         div.filters {
             div.ranges role="group" aria-label="Range" {
                 @for each in Range::EVERY {
-                    a href=(href(channel, each))
-                        aria-current=[(each == range).then_some("page")] { (each.label()) }
+                    a href=(view.with_range(each).href())
+                        aria-current=[(each == view.range).then_some("page")] { (each.label()) }
                 }
             }
             @if channels.len() > 1 {
                 form.inline method="get" action="/sensors" {
-                    input type="hidden" name="range" value=(range.name());
+                    input type="hidden" name="range" value=(view.range.name());
+                    @if !view.faults {
+                        input type="hidden" name="faults" value="hide";
+                    }
                     label {
                         "Channel "
                         select name="channel" {
@@ -132,6 +180,18 @@ fn page(channels: &[String], channel: Option<&str>, range: Range, graph: Option<
                         }
                     }
                     button type="submit" { "Show" }
+                }
+            }
+            @if faulty > 0 || !view.faults {
+                p.fault-toggle {
+                    @if view.faults {
+                        span.fault-key {} " " (number(faulty as i64)) " faulty reading"
+                        @if faulty != 1 { "s" } " flagged. "
+                        a href=(view.with_faults(false).href()) { "Hide them" }
+                    } @else {
+                        "Faulty readings are hidden. "
+                        a href=(view.with_faults(true).href()) { "Flag them" }
+                    }
                 }
             }
         }
@@ -145,7 +205,10 @@ fn page(channels: &[String], channel: Option<&str>, range: Range, graph: Option<
                 p.note {
                     "Each line is the mean of every " (chart::duration_words(graph.point_size))
                     " of readings, and its band spans the lowest to the highest. Every nick "
-                    "that posted to " (channel) " counts as the same device."
+                    "that posted to " (channel) " counts as the same device. Faulty readings "
+                    "are left out of the lines and the tables"
+                    @if view.faults { ", and flagged as red marks along the edge" }
+                    "."
                 }
                 @for measure in &graph.measures {
                     @let (name, unit) = measure_name(&measure.measure);
@@ -154,19 +217,19 @@ fn page(channels: &[String], channel: Option<&str>, range: Range, graph: Option<
                             (name)
                             @if !unit.is_empty() { " (" (unit) ")" }
                         }
-                        (chart::chart(graph, measure))
-                        (summary(graph, measure))
+                        (chart::chart(graph, measure, view.faults))
+                        (summary(graph, measure, view.faults))
                     }
                 }
                 h2 { "Download" }
                 p {
                     "CSV files of this range: "
-                    a href=(csv_href(channel, range, "shown")) download { "the points shown" }
+                    a href=(view.csv_href("shown")) download { "the points shown" }
                     ", "
-                    a href=(csv_href(channel, range, "hours")) download { "hourly points" }
-                    @if range.readings_downloadable() {
+                    a href=(view.csv_href("hours")) download { "hourly points" }
+                    @if view.range.readings_downloadable() {
                         ", or "
-                        a href=(csv_href(channel, range, "readings")) download { "every reading" }
+                        a href=(view.csv_href("readings")) download { "every reading" }
                         "."
                     } @else {
                         ". Every reading can be downloaded for a month or less."
@@ -174,8 +237,13 @@ fn page(channels: &[String], channel: Option<&str>, range: Range, graph: Option<
                 }
                 p.note {
                     "Points have their start time, sensor, measure, how many readings they "
-                    "average, and the mean, lowest and highest. Readings have their time as the "
-                    "logs show it and in UTC. Every nick counts as the same device."
+                    "average, and the mean, lowest and highest, leaving faulty readings out. "
+                    "Readings have their time as the logs show it and in UTC"
+                    @if view.faults {
+                        ", with faulty readings marked " code { "range" } " or " code { "spike" }
+                        " in the last column"
+                    }
+                    ". Every nick counts as the same device."
                 }
             }
         }
@@ -183,8 +251,9 @@ fn page(channels: &[String], channel: Option<&str>, range: Range, graph: Option<
 }
 
 /// Each sensor's latest reading, and its lowest, mean and highest over the
-/// range: the chart's values without hovering.
-fn summary(graph: &Graph, measure: &Measure) -> Markup {
+/// range: the chart's values without hovering. With `faults`, how many
+/// faulty readings were left out.
+fn summary(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
     html! {
         div.scroll {
             table.summary {
@@ -197,6 +266,9 @@ fn summary(graph: &Graph, measure: &Measure) -> Markup {
                         th.num title="Over the range shown" { "Mean" }
                         th.num title="Over the range shown" { "High" }
                         th.num title="Over the range shown" { "Readings" }
+                        @if faults {
+                            th.num title="Left out, over the range shown" { "Faulty" }
+                        }
                     }
                 }
                 tbody {
@@ -230,6 +302,9 @@ fn summary(graph: &Graph, measure: &Measure) -> Markup {
                                     td.num { "-" }
                                     td.num { "0" }
                                 },
+                            }
+                            @if faults {
+                                td.num { (number(line.faults.len() as i64)) }
                             }
                         }
                     }
@@ -277,9 +352,8 @@ async fn download(
                      range, or the hourly points.",
                 ));
             }
-            "readings" => {
-                graphs::readings_csv(conn, &channel, range, &offsets).map_err(internal)?
-            }
+            "readings" => graphs::readings_csv(conn, &channel, range, &offsets, query.faults())
+                .map_err(internal)?,
             other => {
                 return Err(PageError::not_found(format!(
                     "There is no download of {other}."
@@ -306,7 +380,7 @@ async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphs::{Line, Point};
+    use crate::graphs::{Fault, Line, Point};
 
     #[test]
     fn picks_a_channel_and_a_range() {
@@ -326,10 +400,25 @@ mod tests {
         };
         assert_eq!(query.range(), Range::Year);
         assert_eq!(GraphQuery::default().range(), Range::Week);
+        let view = View {
+            channel: "#greenhouse",
+            range: Range::Day,
+            faults: true,
+        };
         assert_eq!(
-            csv_href("#greenhouse", Range::Day, "readings"),
+            view.csv_href("readings"),
             "/sensors.csv?channel=%23greenhouse&range=day&points=readings"
         );
+        assert_eq!(
+            view.with_faults(false).with_range(Range::Year).href(),
+            "/sensors?channel=%23greenhouse&range=year&faults=hide"
+        );
+        let hide = GraphQuery {
+            faults: Some("hide".into()),
+            ..GraphQuery::default()
+        };
+        assert!(!hide.faults());
+        assert!(GraphQuery::default().faults());
         assert_eq!(file_stem("#greenhouse"), "greenhouse");
         assert_eq!(file_stem("#"), "sensors");
     }
@@ -356,18 +445,29 @@ mod tests {
                     Line {
                         sensor: "inside".into(),
                         points: vec![point(first, 51.26)],
+                        faults: vec![Fault {
+                            at: first,
+                            value: 302.0,
+                            reason: "range".into(),
+                        }],
                         latest: Some((second, 51.44)),
                     },
                     Line {
                         sensor: "outside".into(),
                         points: vec![],
+                        faults: vec![],
                         latest: None,
                     },
                 ],
             }],
         };
         let channels = ["#greenhouse".to_string()];
-        let html = page(&channels, Some("#greenhouse"), Range::Year, Some(&graph)).into_string();
+        let view = View {
+            channel: "#greenhouse",
+            range: Range::Year,
+            faults: true,
+        };
+        let html = page(&channels, Some(view), Some(&graph)).into_string();
         assert!(html.contains("<h1>Sensors in #greenhouse</h1>"));
         assert!(html.contains(r#"<a href="/sensors?channel=%23greenhouse&amp;range=year" aria-current="page">Year</a>"#));
         assert!(html.contains(r#"<a href="/sensors?channel=%23greenhouse&amp;range=day">Day</a>"#));
@@ -383,7 +483,27 @@ mod tests {
         assert!(html.contains("Every reading can be downloaded for a month or less."));
         assert!(!html.contains("<select"), "one channel needs no menu");
 
-        let none = page(&[], None, Range::Week, None).into_string();
+        assert!(html.contains("1 faulty reading flagged."));
+        assert!(html.contains(
+            r#"<a href="/sensors?channel=%23greenhouse&amp;range=year&amp;faults=hide">Hide them</a>"#
+        ));
+        assert!(
+            html.contains(
+                r#"<td class="num">51.76</td><td class="num">2</td><td class="num">1</td>"#
+            )
+        );
+        assert!(html.contains("fault top"));
+
+        let hidden = page(&channels, Some(view.with_faults(false)), Some(&graph)).into_string();
+        assert!(hidden.contains("Faulty readings are hidden."));
+        assert!(hidden.contains(
+            r#"<a href="/sensors?channel=%23greenhouse&amp;range=day&amp;faults=hide">Day</a>"#
+        ));
+        assert!(!hidden.contains("Faulty</th>"));
+        assert!(!hidden.contains("fault top"));
+        assert!(hidden.contains("points=hours"));
+
+        let none = page(&[], None, None).into_string();
         assert!(none.contains("No sensor readings yet."));
     }
 }

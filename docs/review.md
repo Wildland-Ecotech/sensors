@@ -64,10 +64,19 @@ the charts.
 - **Colors.** Each sensor keeps its color across measures and ranges, in
   the order of their names, checked for color blindness and contrast in
   light and dark mode.
+- **Faulty readings.** [Faulty readings](readings.md#faulty-readings) are
+  left out of the lines, the axis and the tables, and flagged as red
+  triangles along the top or bottom edge, on the side their values lie
+  beyond, one for each sensor and point. The mark's title, and the tooltip,
+  say how many there were, their values and why they are faulty. Above the
+  charts, the number flagged in the range, and **Hide them** to leave the
+  marks out, which stays set as you change ranges; **Flag them** shows them
+  again. The table under each chart counts them for each sensor.
 - **Tooltips.** Hovering over a chart, or focusing it with Tab and using the
   arrow keys, Home and End, shows the time of the nearest point and every
-  sensor's mean, lowest and highest there. Without the script, the table
-  under each chart and the downloads give the same values.
+  sensor's mean, lowest and highest there, and any faulty readings left out
+  of it. Without the script, the table under each chart, the marks' titles
+  and the downloads give the same values.
 
 ### Downloads
 
@@ -75,10 +84,13 @@ CSV files with a header row, oldest first, every nick together:
 
 - **The points shown** and **hourly points:** `time` (the point's start,
   as the logs show it), `sensor`, `measure`, `readings`, `mean`, `low`,
-  `high`.
+  `high`, leaving faulty readings out.
 - **Every reading**, for a day, a week or a month: `time` (as the logs show
-  it), `utc`, `sensor`, `measure`, `value`. Longer ranges would be hundreds
-  of megabytes, so they offer the hourly points instead.
+  it), `utc`, `sensor`, `measure`, `value`, `fault`. While faulty readings
+  are flagged, they are included with `range` or `spike` in `fault`, which
+  is empty for the rest; while they are hidden, they are left out. Longer
+  ranges would be hundreds of megabytes, so they offer the hourly points
+  instead.
 
 ## Code
 

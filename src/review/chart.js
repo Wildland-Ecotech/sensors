@@ -1,8 +1,8 @@
 // Hover tooltips for the charts on the sensors page. The charts, their
 // legends and the tables under them work without this script. It adds a
 // crosshair that snaps to the nearest point and a tooltip with every
-// sensor's value there, following the pointer, or the arrow keys once a
-// chart has focus.
+// sensor's value there, and any faulty readings left out of it, following
+// the pointer, or the arrow keys once a chart has focus.
 (function () {
     "use strict";
 
@@ -58,6 +58,12 @@
         if (!plot || !data.x || data.x.length === 0) {
             return;
         }
+        // The tooltip says what a fault mark's title does, so the browser
+        // need not show its own as well.
+        figure.querySelectorAll(".fault[title]").forEach(function (mark) {
+            mark.setAttribute("aria-label", mark.title);
+            mark.removeAttribute("title");
+        });
         var crosshair = element("div", "crosshair");
         var tooltip = element("div", "chart-tooltip");
         crosshair.hidden = true;
@@ -78,18 +84,29 @@
                 element("div", "tooltip-time", data.times[index] + " · " + data.every)
             );
             data.series.forEach(function (series) {
-                var row = element("div", "tooltip-row");
-                row.append(
-                    element("span", "line-key s" + series.slot),
-                    element("strong", "", format(series.mean[index], data.unit)),
-                    element("span", "muted", series.name)
-                );
-                var low = series.low[index];
-                var high = series.high[index];
-                if (low !== null && high !== null && low !== high) {
-                    row.append(element("span", "muted", format(low) + " to " + format(high)));
+                if (series.mean[index] !== null) {
+                    var row = element("div", "tooltip-row");
+                    row.append(
+                        element("span", "line-key s" + series.slot),
+                        element("strong", "", format(series.mean[index], data.unit)),
+                        element("span", "muted", series.name)
+                    );
+                    var low = series.low[index];
+                    var high = series.high[index];
+                    if (low !== null && high !== null && low !== high) {
+                        row.append(element("span", "muted", format(low) + " to " + format(high)));
+                    }
+                    tooltip.append(row);
                 }
-                tooltip.append(row);
+                var faults = series.faults && series.faults[index];
+                if (faults) {
+                    var fault = element("div", "tooltip-row");
+                    fault.append(
+                        element("span", "fault-key"),
+                        element("span", "", series.name + ", left out: " + faults)
+                    );
+                    tooltip.append(fault);
+                }
             });
             // Right of the crosshair, or left of it near the right edge, and
             // never past the chart's edges, which may reach over the values.

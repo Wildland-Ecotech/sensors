@@ -1,19 +1,23 @@
 //! Charts of readings, drawn on the server: one chart a measure, with a line
 //! a sensor through the mean of each point and a faint band from its lowest
-//! to its highest reading. They need no script. `chart.js` adds a crosshair
+//! to its highest reading. Faulty readings, which the lines and the axis
+//! leave out, are flagged as red marks along the top or bottom edge, on the
+//! side of the chart their values lie, with what they were in the mark's
+//! title. They need no script. `chart.js` adds a crosshair
 //! and a tooltip from the points in the chart's `data-points`.
 //!
 //! The lines are an SVG stretched to the plot's box, with strokes that keep
 //! their width, while the axis labels are HTML placed by percentage, so text
 //! stays legible at any width.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime};
 use maud::{Markup, html};
 use serde_json::json;
 
+use crate::faults::Reason;
 use crate::graphs::{DAY, Graph, Line, MINUTE, Measure, Point, decimal, time_text};
 use crate::readings::HOUR;
 
@@ -75,9 +79,62 @@ fn point_time(at: i64, point_size: i64) -> String {
     }
 }
 
-/// One measure's chart: its legend, the plot with its axes, and the points
-/// for the script.
-pub fn chart(graph: &Graph, measure: &Measure) -> Markup {
+/// One sensor's faulty readings in one point's time.
+struct FaultGroup {
+    /// The point's start, as the logs show times.
+    at: i64,
+    /// The line's index among the measure's lines.
+    line: usize,
+    values: Vec<f64>,
+    reasons: BTreeSet<String>,
+}
+
+impl FaultGroup {
+    /// What they were, such as `2 faulty readings: 302, 302.5, out of range`.
+    fn describe(&self) -> String {
+        const SHOWN: usize = 3;
+        let mut values: Vec<String> = self
+            .values
+            .iter()
+            .take(SHOWN)
+            .map(|&v| decimal(v))
+            .collect();
+        if self.values.len() > SHOWN {
+            values.push("…".to_string());
+        }
+        let reasons: Vec<&str> = self.reasons.iter().map(|r| Reason::describe(r)).collect();
+        let count = self.values.len();
+        format!(
+            "{count} faulty reading{}: {}, {}",
+            if count == 1 { "" } else { "s" },
+            values.join(", "),
+            reasons.join(" and ")
+        )
+    }
+}
+
+/// The faulty readings of a measure, grouped by sensor and point.
+fn fault_groups(graph: &Graph, measure: &Measure) -> Vec<FaultGroup> {
+    let mut groups: BTreeMap<(i64, usize), FaultGroup> = BTreeMap::new();
+    for (index, line) in measure.lines.iter().enumerate() {
+        for fault in &line.faults {
+            let at = fault.at.div_euclid(graph.point_size) * graph.point_size;
+            let group = groups.entry((at, index)).or_insert_with(|| FaultGroup {
+                at,
+                line: index,
+                values: Vec::new(),
+                reasons: BTreeSet::new(),
+            });
+            group.values.push(fault.value);
+            group.reasons.insert(fault.reason.clone());
+        }
+    }
+    groups.into_values().collect()
+}
+
+/// One measure's chart: its legend, the plot with its axes, the faulty
+/// readings' marks when `faults` is set, and the points for the script.
+pub fn chart(graph: &Graph, measure: &Measure, faults: bool) -> Markup {
     let (name, unit) = measure_name(&measure.measure);
     let points = || measure.lines.iter().flat_map(|line| &line.points);
     let low = points()
@@ -96,6 +153,12 @@ pub fn chart(graph: &Graph, measure: &Measure) -> Markup {
         low: values[0],
         high: values[values.len() - 1],
     };
+    let groups = if faults {
+        fault_groups(graph, measure)
+    } else {
+        Vec::new()
+    };
+    let middle = (scale.low + scale.high) / 2.0;
     let label = format!(
         "{name} from {} to {}: {}",
         time_text(graph.start, false),
@@ -116,13 +179,19 @@ pub fn chart(graph: &Graph, measure: &Measure) -> Markup {
             .join(", ")
     );
     html! {
-        figure.chart data-points=(points_json(graph, measure, unit)) {
-            @if measure.lines.len() > 1 {
+        figure.chart data-points=(points_json(graph, measure, unit, &groups)) {
+            @if measure.lines.len() > 1 || !groups.is_empty() {
                 div.chart-legend {
                     @for line in &measure.lines {
                         span.legend-item {
                             span class=(format!("line-key s{}", slot(graph, &line.sensor))) {}
                             (sensor_name(&line.sensor))
+                        }
+                    }
+                    @if !groups.is_empty() {
+                        span.legend-item {
+                            span.fault-key {}
+                            "Faulty readings, left out"
                         }
                     }
                 }
@@ -148,6 +217,27 @@ pub fn chart(graph: &Graph, measure: &Measure) -> Markup {
                             @let slot = slot(graph, &line.sensor);
                             path class=(format!("band s{slot}")) d=(paths.band) {}
                             path class=(format!("line s{slot}")) d=(paths.line) {}
+                        }
+                    }
+                    @if !groups.is_empty() {
+                        div.fault-marks {
+                            @for group in &groups {
+                                @let line = &measure.lines[group.line];
+                                @let left = scale.x(group.at + graph.point_size / 2) / SIZE * 100.0;
+                                @let title = format!(
+                                    "{} {}: {}",
+                                    point_time(group.at, graph.point_size),
+                                    sensor_name(&line.sensor),
+                                    group.describe()
+                                );
+                                @for top in [true, false] {
+                                    @if group.values.iter().any(|&v| (v >= middle) == top) {
+                                        span class=(if top { "fault top" } else { "fault bottom" })
+                                            style=(format!("left: {left:.2}%"))
+                                            title=(title) {}
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -239,7 +329,7 @@ fn paths(line: &Line, point_size: i64, scale: &Scale) -> Paths {
 /// The points as JSON for the script: each point's time label and place
 /// across the plot, and each sensor's mean, lowest and highest value there,
 /// or `null` where it has none.
-fn points_json(graph: &Graph, measure: &Measure, unit: &str) -> String {
+fn points_json(graph: &Graph, measure: &Measure, unit: &str, groups: &[FaultGroup]) -> String {
     let scale = Scale {
         start: graph.start,
         end: graph.end,
@@ -249,6 +339,9 @@ fn points_json(graph: &Graph, measure: &Measure, unit: &str) -> String {
     let mut index: BTreeMap<i64, usize> = BTreeMap::new();
     for point in measure.lines.iter().flat_map(|line| &line.points) {
         index.insert(point.at, 0);
+    }
+    for group in groups {
+        index.insert(group.at, 0);
     }
     for (i, slot) in index.values_mut().enumerate() {
         *slot = i;
@@ -268,15 +361,20 @@ fn points_json(graph: &Graph, measure: &Measure, unit: &str) -> String {
     let series: Vec<serde_json::Value> = measure
         .lines
         .iter()
-        .map(|line| {
+        .enumerate()
+        .map(|(number, line)| {
             let mut mean = vec![None; index.len()];
             let mut low = vec![None; index.len()];
             let mut high = vec![None; index.len()];
+            let mut faults: Vec<Option<String>> = vec![None; index.len()];
             for point in &line.points {
                 let i = index[&point.at];
                 mean[i] = Some(round(point.mean()));
                 low[i] = Some(round(point.low));
                 high[i] = Some(round(point.high));
+            }
+            for group in groups.iter().filter(|group| group.line == number) {
+                faults[index[&group.at]] = Some(group.describe());
             }
             json!({
                 "name": sensor_name(&line.sensor),
@@ -284,6 +382,7 @@ fn points_json(graph: &Graph, measure: &Measure, unit: &str) -> String {
                 "mean": mean,
                 "low": low,
                 "high": high,
+                "faults": faults,
             })
         })
         .collect();
@@ -428,6 +527,7 @@ fn naive(at: i64) -> NaiveDateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graphs::Fault;
 
     /// Milliseconds for a time on a day of November 2026.
     fn nov(day: u32, hour: u32, minute: u32) -> i64 {
@@ -532,6 +632,7 @@ mod tests {
                 point(nov(3, 1, 0), 60.0),
                 point(nov(3, 5, 0), 55.0),
             ],
+            faults: vec![],
             latest: None,
         };
         let scale = Scale {
@@ -557,16 +658,18 @@ mod tests {
             Line {
                 sensor: "inside".into(),
                 points: vec![point(nov(3, 0, 0), 50.0), point(nov(3, 1, 0), 60.0)],
+                faults: vec![],
                 latest: None,
             },
             Line {
                 sensor: "outside".into(),
                 points: vec![point(nov(3, 1, 0), 45.5)],
+                faults: vec![],
                 latest: None,
             },
         ];
         let graph = graph(lines);
-        let html = chart(&graph, &graph.measures[0]).into_string();
+        let html = chart(&graph, &graph.measures[0], true).into_string();
         assert!(html.contains(r#"<span class="line-key s1"></span>inside"#));
         assert!(html.contains(r#"<span class="line-key s2"></span>outside"#));
         assert!(html.contains(r#"<path class="line s2" d="M150.0,"#));
@@ -585,10 +688,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn flags_faulty_readings_at_the_edge_they_lie_beyond() {
+        let fault = |at: i64, value: f64, reason: &str| Fault {
+            at,
+            value,
+            reason: reason.into(),
+        };
+        let line = Line {
+            sensor: "inside".into(),
+            points: vec![point(nov(3, 0, 0), 50.0), point(nov(3, 1, 0), 60.0)],
+            faults: vec![
+                fault(nov(3, 0, 10), 302.0, "range"),
+                fault(nov(3, 0, 40), 302.5, "range"),
+                fault(nov(3, 2, 0), -58.0, "range"),
+            ],
+            latest: None,
+        };
+        let graph = graph(vec![line]);
+        let html = chart(&graph, &graph.measures[0], true).into_string();
+        assert!(html.contains(
+            r#"<span class="fault top" style="left: 5.00%" title="2026-11-03 00:00 inside: 2 faulty readings: 302, 302.5, out of range"></span>"#
+        ));
+        assert!(html.contains(r#"<span class="fault bottom" style="left: 25.00%""#));
+        assert!(html.contains("Faulty readings, left out"));
+        assert!(html.contains("&quot;faults&quot;:[&quot;2 faulty readings: 302, 302.5, out of range&quot;,null,&quot;1 faulty reading: -58, out of range&quot;]"));
+        // The axis leaves them out.
+        assert!(!html.contains(">300<"));
+
+        let hidden = chart(&graph, &graph.measures[0], false).into_string();
+        assert!(!hidden.contains("fault top"));
+        assert!(!hidden.contains("Faulty readings"));
+        assert!(hidden.contains("&quot;faults&quot;:[null,null]"));
+    }
+
     fn graph_with_no_points() -> Graph {
         graph(vec![Line {
             sensor: "inside".into(),
             points: vec![],
+            faults: vec![],
             latest: None,
         }])
     }

@@ -44,6 +44,13 @@ pub fn build_summary(out: &mut impl Write, summary: &BuildSummary) -> io::Result
             count_u64(summary.untimed, "JSON line")
         )?;
     }
+    if summary.faults > 0 {
+        writeln!(
+            out,
+            "Flagged {} in all, left out of graphs",
+            count_u64(summary.faults, "faulty reading")
+        )?;
+    }
     Ok(())
 }
 
@@ -201,13 +208,15 @@ mod tests {
         let summary = BuildSummary {
             repeated: 2,
             untimed: 1,
+            faults: 1,
             ..BuildSummary::default()
         };
         build_summary(&mut out, &summary).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "Left out 2 readings at the same time as another of the same measure\n\
-             Left out 1 JSON line without a timestamp\n"
+             Left out 1 JSON line without a timestamp\n\
+             Flagged 1 faulty reading in all, left out of graphs\n"
         );
     }
 

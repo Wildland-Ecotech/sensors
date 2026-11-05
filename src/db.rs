@@ -40,7 +40,7 @@ const HEAD_LEN: u64 = 1024;
 /// The schema, as the steps that build it. SQLite's `user_version` stores how
 /// many steps a database has had, so an older database is brought up to date
 /// by running the steps it is missing.
-const MIGRATIONS: [&str; 4] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+const MIGRATIONS: [&str; 5] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE files (
@@ -194,6 +194,25 @@ CREATE TABLE channels (
 );
 
 INSERT INTO channels (name) VALUES ('#greenhouse');
+";
+
+const SCHEMA_V5: &str = "
+-- Readings a sensor reported when its hardware misbehaved, found while the
+-- readings are built, as the faults module describes. Hours, lines and the
+-- latest reading leave them out.
+CREATE TABLE reading_faults (
+    series_id INTEGER NOT NULL REFERENCES sensor_series (id),
+    -- The reading's time, in milliseconds since 1970 UTC, as in readings.
+    at INTEGER NOT NULL,
+    value REAL NOT NULL,
+    -- 'range' when out of range, 'spike' when it jumped away and back.
+    reason TEXT NOT NULL CHECK (reason IN ('range', 'spike')),
+    PRIMARY KEY (series_id, at)
+) WITHOUT ROWID;
+
+-- Without a build state, the next sensors analyze reads every line again and
+-- finds the faults in readings already read.
+DELETE FROM reading_state;
 ";
 
 const INSERT_EVENT: &str = "
@@ -812,7 +831,8 @@ mod tests {
                         + (SELECT count(*) FROM reading_markers)
                         + (SELECT count(*) FROM log_offsets)
                         + (SELECT count(*) FROM reading_state)
-                        + (SELECT count(*) FROM channel_days)",
+                        + (SELECT count(*) FROM channel_days)
+                        + (SELECT count(*) FROM reading_faults)",
                 [],
                 |row| row.get(0),
             )

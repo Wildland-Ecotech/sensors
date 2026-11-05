@@ -20,6 +20,12 @@
 //! count, mean, lowest and highest value are kept in `reading_hours`, so
 //! graphs of months or years read a row an hour instead of every reading.
 //!
+//! The same pass finds faulty readings, as the `faults` module describes,
+//! and keeps them in `reading_faults`. Hours, lines and the latest reading
+//! leave them out. A new reading is checked with the two before it, whose
+//! neighbors it changed, so a spike is found once the reading after it
+//! arrives.
+//!
 //! Timestamps are UTC, while the logs are in the logging computer's time
 //! zone. The difference between a line's timestamp and the time irssi
 //! logged it gives the logs' UTC offset, kept for each hour in
@@ -33,6 +39,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
 use crate::db::Result;
+use crate::faults;
 use crate::progress::{Progress, Unit};
 use crate::report::thousands;
 
@@ -198,6 +205,8 @@ pub struct BuildSummary {
     pub markers: u64,
     /// Lines with readings or a marker but no usable timestamp, left out.
     pub untimed: u64,
+    /// Faulty readings in the database after the build, new or not.
+    pub faults: u64,
 }
 
 /// Builds the readings quietly, for tests.
@@ -207,16 +216,26 @@ pub fn build(conn: &mut Connection, full: bool) -> Result<BuildSummary> {
 }
 
 /// Reads the readings in the channel messages imported since the last
-/// build, or in all of them when `full` is set, in one transaction.
+/// build, or in all of them when `full` is set or nothing was built yet, in
+/// one transaction.
 pub fn build_with_progress(
     conn: &mut Connection,
     full: bool,
     progress: &mut Progress,
 ) -> Result<BuildSummary> {
     let tx = conn.transaction()?;
+    let state: Option<i64> = tx
+        .query_row(
+            "SELECT last_event_id FROM reading_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let full = full || state.is_none();
     let last: i64 = if full {
         tx.execute_batch(
             "DELETE FROM readings;
+             DELETE FROM reading_faults;
              DELETE FROM reading_hours;
              DELETE FROM reading_markers;
              DELETE FROM log_offsets;
@@ -226,13 +245,7 @@ pub fn build_with_progress(
         )?;
         0
     } else {
-        tx.query_row(
-            "SELECT last_event_id FROM reading_state WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0)
+        state.unwrap_or(0)
     };
     let newest: i64 = tx.query_row("SELECT ifnull(max(id), 0) FROM events", [], |row| {
         row.get(0)
@@ -250,6 +263,7 @@ pub fn build_with_progress(
     );
     let mut builder = Builder::load(&tx)?;
     builder.read_events(&tx, last, newest, progress)?;
+    builder.check_faults(&tx)?;
     builder.save_hours(&tx)?;
     builder.save_offsets(&tx)?;
     builder.save_days(&tx)?;
@@ -262,10 +276,11 @@ pub fn build_with_progress(
 
     let summary = builder.summary;
     progress.done(&format!(
-        "{} messages, {} new readings, {} new markers",
+        "{} messages, {} new readings, {} new markers, {} faulty readings in all",
         thousands(summary.messages),
         thousands(summary.readings),
         thousands(summary.markers),
+        thousands(summary.faults),
     ));
     Ok(summary)
 }
@@ -277,8 +292,12 @@ type SeriesKey = (String, String, String, String, String);
 struct Builder {
     /// The id of each series already in the database.
     series: HashMap<SeriesKey, i64>,
-    /// The series and hours given new readings, whose rows in
-    /// `reading_hours` are counted again.
+    /// Each series' measure, by id.
+    measures: HashMap<i64, String>,
+    /// The series given new readings, and the first new reading's time.
+    fresh: HashMap<i64, i64>,
+    /// The series and hours given new readings or whose faults may have
+    /// changed, whose rows in `reading_hours` are counted again.
     touched: HashSet<(i64, i64)>,
     /// Lines seen in each hour with each UTC offset.
     offsets: HashMap<(i64, i64), i64>,
@@ -291,7 +310,7 @@ impl Builder {
     fn load(tx: &Transaction<'_>) -> Result<Builder> {
         let mut stmt =
             tx.prepare("SELECT id, tag, channel, nick, sensor, measure FROM sensor_series")?;
-        let series = stmt
+        let series: HashMap<SeriesKey, i64> = stmt
             .query_map([], |row| {
                 Ok((
                     (
@@ -305,8 +324,14 @@ impl Builder {
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
+        let measures = series
+            .iter()
+            .map(|(key, &id)| (id, key.4.clone()))
+            .collect();
         Ok(Builder {
             series,
+            measures,
+            fresh: HashMap::new(),
             touched: HashSet::new(),
             offsets: HashMap::new(),
             days: HashMap::new(),
@@ -399,6 +424,10 @@ impl Builder {
                         if insert_reading.execute(params![series, at, value])? == 1 {
                             self.summary.readings += 1;
                             self.touched.insert((series, at.div_euclid(HOUR)));
+                            self.fresh
+                                .entry(series)
+                                .and_modify(|first| *first = (*first).min(at))
+                                .or_insert(at);
                         } else {
                             self.summary.repeated += 1;
                         }
@@ -433,18 +462,71 @@ impl Builder {
             params![key.0, key.1, key.2, key.3, key.4],
         )?;
         let id = tx.last_insert_rowid();
+        self.measures.insert(id, key.4.clone());
         self.series.insert(key, id);
         Ok(id)
     }
 
-    /// Counts each hour given new readings again, from all its readings.
+    /// Checks each series' new readings for faults, with the two readings
+    /// before them, whose neighbors changed, and two more before those as
+    /// their neighbors.
+    fn check_faults(&mut self, tx: &Transaction<'_>) -> Result<()> {
+        let mut earlier = tx.prepare_cached(
+            "SELECT at FROM readings WHERE series_id = ?1 AND at < ?2 ORDER BY at DESC LIMIT 4",
+        )?;
+        let mut load = tx.prepare_cached(
+            "SELECT at, value FROM readings WHERE series_id = ?1 AND at >= ?2 ORDER BY at",
+        )?;
+        let mut clear =
+            tx.prepare_cached("DELETE FROM reading_faults WHERE series_id = ?1 AND at >= ?2")?;
+        let mut insert = tx.prepare_cached(
+            "INSERT INTO reading_faults (series_id, at, value, reason) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (&series, &first) in &self.fresh {
+            let Some(rule) = self.measures.get(&series).and_then(|m| faults::rule(m)) else {
+                continue;
+            };
+            // Newest first.
+            let before: Vec<i64> = earlier
+                .query_map(params![series, first], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let check_from = before.get(1).or(before.first()).copied().unwrap_or(first);
+            let load_from = before.last().copied().unwrap_or(first);
+            let readings: Vec<(i64, f64)> = load
+                .query_map(params![series, load_from], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            clear.execute(params![series, check_from])?;
+            for (at, value, reason) in faults::detect(&readings, check_from, &rule) {
+                insert.execute(params![series, at, value, reason.as_str()])?;
+            }
+            // Their hours are counted again, without the faults.
+            for &(at, _) in readings.iter().filter(|(at, _)| *at >= check_from) {
+                self.touched.insert((series, at.div_euclid(HOUR)));
+            }
+        }
+        self.summary.faults =
+            tx.query_row("SELECT count(*) FROM reading_faults", [], |row| row.get(0))?;
+        Ok(())
+    }
+
+    /// Counts each hour given new readings, or whose faults may have changed,
+    /// again from its readings that are not faulty. An hour of only faulty
+    /// readings has no row.
     fn save_hours(&self, tx: &Transaction<'_>) -> Result<()> {
+        let mut clear =
+            tx.prepare_cached("DELETE FROM reading_hours WHERE series_id = ?1 AND hour = ?2")?;
         let mut count = tx.prepare_cached(
-            "INSERT OR REPLACE INTO reading_hours (series_id, hour, readings, total, low, high)
+            "INSERT INTO reading_hours (series_id, hour, readings, total, low, high)
              SELECT ?1, ?2, count(*), sum(value), min(value), max(value)
-             FROM readings WHERE series_id = ?1 AND at >= ?3 AND at < ?4",
+             FROM readings r WHERE series_id = ?1 AND at >= ?3 AND at < ?4
+               AND NOT EXISTS (SELECT 1 FROM reading_faults f
+                               WHERE f.series_id = r.series_id AND f.at = r.at)
+             HAVING count(*) > 0",
         )?;
         for &(series, hour) in &self.touched {
+            clear.execute(params![series, hour])?;
             count.execute(params![series, hour, hour * HOUR, (hour + 1) * HOUR])?;
         }
         Ok(())
@@ -482,25 +564,33 @@ pub struct Series {
     /// Empty when the lines have no `sensor` field.
     pub sensor: String,
     pub measure: String,
+    /// Readings that are not faulty.
     pub readings: i64,
-    /// The first and last reading's time, in milliseconds since 1970 UTC.
+    /// The first reading's time, and the last that is not faulty, in
+    /// milliseconds since 1970 UTC.
     pub first: Option<i64>,
     pub last: Option<i64>,
-    /// The last reading's value.
+    /// The last value that is not faulty.
     pub latest: Option<f64>,
 }
 
+/// The newest reading of a series that is not faulty, read newest first
+/// through the primary key, so it stops at the first.
+const NEWEST_GOOD: &str = "FROM readings r WHERE r.series_id = s.id
+    AND NOT EXISTS (SELECT 1 FROM reading_faults f WHERE f.series_id = r.series_id AND f.at = r.at)
+    ORDER BY r.at DESC LIMIT 1";
+
 /// Every series, by channel, nick, sensor and measure.
 pub fn series(conn: &Connection) -> Result<Vec<Series>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT s.channel, s.nick, s.sensor, s.measure,
                 (SELECT ifnull(sum(readings), 0) FROM reading_hours h WHERE h.series_id = s.id),
                 (SELECT min(at) FROM readings r WHERE r.series_id = s.id),
-                (SELECT max(at) FROM readings r WHERE r.series_id = s.id),
-                (SELECT value FROM readings r WHERE r.series_id = s.id ORDER BY at DESC LIMIT 1)
+                (SELECT r.at {NEWEST_GOOD}),
+                (SELECT r.value {NEWEST_GOOD})
          FROM sensor_series s
-         ORDER BY s.channel, s.nick, s.sensor, s.measure, s.tag",
-    )?;
+         ORDER BY s.channel, s.nick, s.sensor, s.measure, s.tag"
+    ))?;
     let rows = stmt
         .query_map([], |row| {
             Ok(Series {
@@ -679,6 +769,7 @@ mod tests {
                 repeated: 0,
                 markers: 1,
                 untimed: 0,
+                faults: 0,
             }
         );
         assert_eq!(
@@ -747,6 +838,7 @@ mod tests {
                 repeated: 2,
                 markers: 0,
                 untimed: 1,
+                faults: 0,
             }
         );
         assert_eq!(hours(&conn)[1], "inside temp 3 68.48 68.36 68.54");
@@ -762,5 +854,63 @@ mod tests {
         assert_eq!((summary.readings, summary.repeated), (10, 2));
         assert_eq!(hours(&conn), before);
         assert_eq!(lines(&conn), 10);
+    }
+
+    #[test]
+    fn flags_faulty_readings_and_leaves_them_out_of_hours() {
+        let root = TempDir::new("readings-faults");
+        fs::create_dir_all(root.0.join("wetfish")).unwrap();
+        let log = root.0.join("wetfish/#greenhouse.log");
+        let line = |minute: u32, second: u32, temp: &str| {
+            format!(
+                "13:{minute:02} < greenhouse> {{\"sensor\":\"inside\",\"temp\":\"{temp}\",\
+                 \"timestamp\":\"2026-11-03T20:{minute:02}:{second:02}.000Z\"}}\n"
+            )
+        };
+        let mut text = String::from("--- Log opened Tue Nov 03 13:40:00 2026\n");
+        for (minute, second, temp) in [
+            (41, 0, "67.40"),
+            (41, 30, "302.00"),
+            (42, 0, "67.50"),
+            (42, 30, "67.60"),
+            (43, 0, "95.50"),
+        ] {
+            text.push_str(&line(minute, second, temp));
+        }
+        fs::write(&log, text).unwrap();
+        let mut conn = db::open(&root.0.join("sensors.sqlite")).unwrap();
+        import(&root, &mut conn);
+
+        // 302 is out of range; 95.5 waits for the reading after it.
+        let summary = build(&mut conn, false).unwrap();
+        assert_eq!((summary.readings, summary.faults), (5, 1));
+        assert_eq!(hours(&conn), ["inside temp 4 74.50 67.4 95.5"]);
+
+        // It came straight back, so 95.5 was a spike.
+        append(&log, &line(43, 30, "67.55"));
+        import(&root, &mut conn);
+        let summary = build(&mut conn, false).unwrap();
+        assert_eq!(summary.faults, 2);
+        assert_eq!(hours(&conn), ["inside temp 4 67.51 67.4 67.6"]);
+        let faults: Vec<(f64, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT value, reason FROM reading_faults ORDER BY at")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            faults,
+            [(302.0, "range".to_string()), (95.5, "spike".to_string())]
+        );
+        let latest = series(&conn).unwrap();
+        assert_eq!(latest[0].latest, Some(67.55));
+
+        // Reading everything again finds the same.
+        let summary = build(&mut conn, true).unwrap();
+        assert_eq!(summary.faults, 2);
+        assert_eq!(hours(&conn), ["inside temp 4 67.51 67.4 67.6"]);
     }
 }

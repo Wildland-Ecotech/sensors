@@ -33,6 +33,7 @@ to 5 seconds for another one to finish.
 | `readings` | reading | `series_id`, `at`, `value` |
 | `reading_hours` | series and hour | `series_id`, `hour`, `readings`, `total` (their sum), `low`, `high` |
 | `reading_markers` | JSON line without readings | `tag`, `channel`, `nick`, `at`, `text` |
+| `reading_faults` | faulty reading | `series_id`, `at`, `value`, `reason` (`range` or `spike`) |
 | `log_offsets` | hour and UTC offset | `hour`, `minutes` (ahead of UTC, such as `-420`), `lines` seen with it |
 | `reading_state` | (one row) | `last_event_id`, the last event read for readings |
 | `channel_days` | channel and day | `tag`, `channel`, `date`, `lines`: messages and actions said |
@@ -40,9 +41,15 @@ to 5 seconds for another one to finish.
 
 The reading tables and `channel_days` are built from the events after each
 import, as [Readings](readings.md) describes. `channels` is set by
-`sensors analyze --channel`, see [Channels](logs.md#channels). `at` is milliseconds since 1970 UTC, and
-`hour` is hours since 1970 UTC, `at / 3600000`. A mean over any stretch of
-hours is `sum(total) / sum(readings)`.
+`sensors analyze --channel`, see [Channels](logs.md#channels). `at` is
+milliseconds since 1970 UTC, and `hour` is hours since 1970 UTC,
+`at / 3600000`. A mean over any stretch of hours is
+`sum(total) / sum(readings)`.
+
+`reading_hours` leaves out the readings in `reading_faults`, while
+`readings` keeps them. A query of `readings` that should leave them out
+needs `NOT EXISTS (SELECT 1 FROM reading_faults f WHERE f.series_id =
+r.series_id AND f.at = r.at)`.
 
 ## Events
 

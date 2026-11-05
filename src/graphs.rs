@@ -13,6 +13,9 @@
 //! `reading_hours`, so a year reads a row an hour, but count such a copy
 //! twice.
 //!
+//! Faulty readings, as the `faults` module finds them, are left out of every
+//! point, and kept beside each line for the page to flag.
+//!
 //! Times on graphs are as the logs show them, in milliseconds since 1970 as
 //! if the logs' time zone were UTC, so points and ticks fall on the logs'
 //! hours and midnights.
@@ -223,15 +226,50 @@ fn local(offsets: &Offsets, at: i64) -> i64 {
     at + offsets.minutes_at(at) * MINUTE
 }
 
-/// The readings of a group from `start` to `end`, one a moment: a reading
-/// posted under two nicks at once counts once.
-fn readings(conn: &Connection, group: &Group, start: i64, end: i64) -> Result<Vec<(i64, f64)>> {
+/// Leaves out the faulty readings of `readings r`.
+const NOT_FAULTY: &str =
+    "NOT EXISTS (SELECT 1 FROM reading_faults f WHERE f.series_id = r.series_id AND f.at = r.at)";
+
+/// The group's series ids, then `start` and `end`, as query values.
+fn group_values(group: &Group, start: i64, end: i64) -> Vec<Value> {
     let mut values: Vec<Value> = group.ids.iter().map(|&id| Value::from(id)).collect();
     values.push(Value::from(start));
     values.push(Value::from(end));
+    values
+}
+
+/// The readings of a group from `start` to `end` that are not faulty, one a
+/// moment: a reading posted under two nicks at once counts once.
+fn readings(conn: &Connection, group: &Group, start: i64, end: i64) -> Result<Vec<(i64, f64)>> {
     let n = group.ids.len();
     let mut stmt = conn.prepare(&format!(
-        "SELECT at, avg(value) FROM readings
+        "SELECT at, avg(value) FROM readings r
+         WHERE series_id IN ({}) AND at >= ?{} AND at <= ?{} AND {NOT_FAULTY}
+         GROUP BY at ORDER BY at",
+        placeholders(1, n),
+        n + 1,
+        n + 2
+    ))?;
+    let rows = stmt
+        .query_map(
+            params_from_iter(group_values(group, start, end).iter()),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// The faulty readings of a group from `start` to `end`, one a moment, with
+/// why each is faulty.
+fn faulty(
+    conn: &Connection,
+    group: &Group,
+    start: i64,
+    end: i64,
+) -> Result<Vec<(i64, f64, String)>> {
+    let n = group.ids.len();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT at, avg(value), min(reason) FROM reading_faults
          WHERE series_id IN ({}) AND at >= ?{} AND at <= ?{}
          GROUP BY at ORDER BY at",
         placeholders(1, n),
@@ -239,19 +277,21 @@ fn readings(conn: &Connection, group: &Group, start: i64, end: i64) -> Result<Ve
         n + 2
     ))?;
     let rows = stmt
-        .query_map(params_from_iter(values.iter()), |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?
+        .query_map(
+            params_from_iter(group_values(group, start, end).iter()),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
 
-/// The most recent reading of a group, as its time in milliseconds since
-/// 1970 UTC and its value.
+/// The most recent reading of a group that is not faulty, as its time in
+/// milliseconds since 1970 UTC and its value.
 fn latest(conn: &Connection, group: &Group) -> Result<Option<(i64, f64)>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT at, value FROM readings WHERE series_id = ?1 ORDER BY at DESC LIMIT 1",
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT at, value FROM readings r WHERE series_id = ?1 AND {NOT_FAULTY}
+         ORDER BY at DESC LIMIT 1"
+    ))?;
     let mut latest: Option<(i64, f64)> = None;
     for id in &group.ids {
         let mut rows = stmt.query(params![id])?;
@@ -290,12 +330,24 @@ impl Point {
     }
 }
 
+/// A faulty reading, left out of the points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fault {
+    /// When, as the logs show times.
+    pub at: i64,
+    pub value: f64,
+    /// `range` or `spike`.
+    pub reason: String,
+}
+
 /// One measure from one sensor, every nick together, over the range.
 #[derive(Debug)]
 pub struct Line {
     pub sensor: String,
-    /// Oldest first, only points with readings.
+    /// Oldest first, only points with readings that are not faulty.
     pub points: Vec<Point>,
+    /// The faulty readings over the range, oldest first.
+    pub faults: Vec<Fault>,
     /// The most recent reading ever, as the logs show its time, and its value.
     pub latest: Option<(i64, f64)>,
 }
@@ -393,9 +445,18 @@ impl Graph {
                     }
                 }
             }
+            let faults = faulty(conn, group, start, end)?
+                .into_iter()
+                .map(|(at, value, reason)| Fault {
+                    at: local(offsets, at),
+                    value,
+                    reason,
+                })
+                .collect();
             let line = Line {
                 sensor: group.sensor.clone(),
                 points: points.into_values().collect(),
+                faults,
                 latest: latest(conn, group)?.map(|(at, value)| (local(offsets, at), value)),
             };
             let same = measures
@@ -493,13 +554,15 @@ pub fn points_csv(graph: &Graph) -> String {
 }
 
 /// Every reading of a channel over a range as CSV, oldest first: its time as
-/// the logs show it and in UTC, its sensor, measure and value. `None` when
-/// the range is too long to hold in memory, or has no readings.
+/// the logs show it and in UTC, its sensor, measure and value, and why it is
+/// faulty, if it is. Faulty readings are left out unless `faults` is set.
+/// `None` when the range is too long to hold in memory, or has no readings.
 pub fn readings_csv(
     conn: &Connection,
     channel: &str,
     range: Range,
     offsets: &Offsets,
+    faults: bool,
 ) -> Result<Option<String>> {
     if !range.readings_downloadable() {
         return Ok(None);
@@ -508,21 +571,26 @@ pub fn readings_csv(
     let Some((start, end)) = window(conn, &groups, range)? else {
         return Ok(None);
     };
-    let mut rows: Vec<(i64, usize, &Group, f64)> = Vec::new();
+    let mut rows: Vec<(i64, usize, &Group, f64, String)> = Vec::new();
     for (order, group) in groups.iter().enumerate() {
         for (at, value) in readings(conn, group, start, end)? {
-            rows.push((at, order, group, value));
+            rows.push((at, order, group, value, String::new()));
+        }
+        if faults {
+            for (at, value, reason) in faulty(conn, group, start, end)? {
+                rows.push((at, order, group, value, reason));
+            }
         }
     }
     rows.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-    let mut csv = String::from("time,utc,sensor,measure,value\n");
-    for (at, _, group, value) in rows {
+    let mut csv = String::from("time,utc,sensor,measure,value,fault\n");
+    for (at, _, group, value, reason) in rows {
         let utc = DateTime::from_timestamp_millis(at)
             .map(|at| at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
             .unwrap_or_default();
         let _ = writeln!(
             csv,
-            "{},{utc},{},{},{value}",
+            "{},{utc},{},{},{value},{reason}",
             time_text(local(offsets, at), true),
             csv_field(&group.sensor),
             csv_field(&group.measure),
@@ -683,25 +751,68 @@ mod tests {
              2026-11-03 15:10,inside,humid,1,30,30,30\n"
         );
         assert_eq!(
-            readings_csv(&conn, "#greenhouse", Range::Day, &offsets)
+            readings_csv(&conn, "#greenhouse", Range::Day, &offsets, true)
                 .unwrap()
                 .unwrap(),
-            "time,utc,sensor,measure,value\n\
-             2026-11-03 13:46:42,2026-11-03T20:46:42.998Z,outside,temp,65.3\n\
-             2026-11-03 13:46:42,2026-11-03T20:46:42.998Z,outside,humid,46\n\
-             2026-11-03 13:46:43,2026-11-03T20:46:43.051Z,inside,temp,68.54\n\
-             2026-11-03 13:46:43,2026-11-03T20:46:43.051Z,inside,humid,35.5\n\
-             2026-11-03 13:47:13,2026-11-03T20:47:13.131Z,inside,temp,68.36\n\
-             2026-11-03 13:47:13,2026-11-03T20:47:13.131Z,inside,humid,36.5\n\
-             2026-11-03 15:10:00,2026-11-03T22:10:00.000Z,inside,temp,70\n\
-             2026-11-03 15:10:00,2026-11-03T22:10:00.000Z,inside,humid,30\n"
+            "time,utc,sensor,measure,value,fault\n\
+             2026-11-03 13:46:42,2026-11-03T20:46:42.998Z,outside,temp,65.3,\n\
+             2026-11-03 13:46:42,2026-11-03T20:46:42.998Z,outside,humid,46,\n\
+             2026-11-03 13:46:43,2026-11-03T20:46:43.051Z,inside,temp,68.54,\n\
+             2026-11-03 13:46:43,2026-11-03T20:46:43.051Z,inside,humid,35.5,\n\
+             2026-11-03 13:47:13,2026-11-03T20:47:13.131Z,inside,temp,68.36,\n\
+             2026-11-03 13:47:13,2026-11-03T20:47:13.131Z,inside,humid,36.5,\n\
+             2026-11-03 15:10:00,2026-11-03T22:10:00.000Z,inside,temp,70,\n\
+             2026-11-03 15:10:00,2026-11-03T22:10:00.000Z,inside,humid,30,\n"
         );
         assert_eq!(
-            readings_csv(&conn, "#greenhouse", Range::Year, &offsets).unwrap(),
+            readings_csv(&conn, "#greenhouse", Range::Year, &offsets, true).unwrap(),
             None
         );
         assert_eq!(csv_field("a,b"), "\"a,b\"");
         assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(decimal(-0.0001), "0");
+    }
+
+    #[test]
+    fn leaves_faults_out_of_points_and_keeps_them_beside_lines() {
+        let (root, mut conn, _) = setup("graphs-faults");
+        let log = root.0.join("wetfish/#greenhouse.log");
+        let mut text = fs::read_to_string(&log).unwrap();
+        text.push_str(
+            "15:11 < greenhouse1> {\"sensor\":\"inside\",\"temp\":\"302.00\",\
+             \"timestamp\":\"2026-11-03T22:11:00.000Z\"}\n",
+        );
+        fs::write(&log, text).unwrap();
+        let inventory = discover::discover(std::slice::from_ref(&root.0)).unwrap();
+        db::import(&mut conn, &inventory.files);
+        readings::build(&mut conn, false).unwrap();
+        let offsets = Offsets::load(&conn).unwrap();
+
+        let graph = Graph::build(&conn, "#greenhouse", Range::Day, &offsets, None)
+            .unwrap()
+            .unwrap();
+        let inside = &graph.measures[0].lines[0];
+        assert_eq!(points(inside).len(), 2, "302 is no point");
+        assert_eq!(inside.latest.unwrap().1, 70.0, "nor the latest reading");
+        assert_eq!(
+            inside.faults,
+            [Fault {
+                at: inside.faults[0].at,
+                value: 302.0,
+                reason: "range".into()
+            }]
+        );
+        assert_eq!(time_text(inside.faults[0].at, false), "2026-11-03 15:11");
+
+        let with = readings_csv(&conn, "#greenhouse", Range::Day, &offsets, true)
+            .unwrap()
+            .unwrap();
+        assert!(
+            with.ends_with("2026-11-03 15:11:00,2026-11-03T22:11:00.000Z,inside,temp,302,range\n")
+        );
+        let without = readings_csv(&conn, "#greenhouse", Range::Day, &offsets, false)
+            .unwrap()
+            .unwrap();
+        assert!(!without.contains("302"));
     }
 }

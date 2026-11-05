@@ -229,6 +229,12 @@ fn build_text(summary: &BuildSummary) -> String {
             count(summary.untimed, "JSON line")
         ));
     }
+    if summary.faults > 0 {
+        text.push_str(&format!(
+            " Flagged {} in all, left out of graphs.",
+            count(summary.faults, "faulty reading")
+        ));
+    }
     text
 }
 
@@ -450,12 +456,13 @@ mod tests {
             repeated: 2,
             markers: 0,
             untimed: 1,
+            faults: 12,
         };
         assert_eq!(
             build_text(&summary),
             "Read 3 messages: 2 new readings and 0 new markers. Left out 2 readings at the \
              same time as another of the same measure. Left out 1 JSON line without a \
-             timestamp."
+             timestamp. Flagged 12 faulty readings in all, left out of graphs."
         );
     }
 

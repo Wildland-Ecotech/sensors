@@ -43,6 +43,36 @@ error.
   line posted twice. They are counted as `Left out N readings at the same time
   as another of the same measure`.
 
+## Faulty readings
+
+Sensors sometimes report a value their hardware made up, from RF
+interference, moisture or condensation on the circuit, rather than one they
+measured. These faulty readings are found as the readings are built, kept
+apart, and left out of every graph line, hourly total, mean, lowest, highest
+and latest reading. A reading is faulty when it is:
+
+- **Out of range:** outside what the measure can plausibly be in the field.
+  A temperature sensor that fails often reports the end of its scale, such
+  as -50 °C or 150 °C, which is -58 °F or 302 °F.
+- **A spike:** further than the measure's spike size from the median of
+  itself and its neighbors, up to two readings each side within three
+  minutes. A reading that jumps away and comes straight back is a spike; a
+  change that lasts, such as a heater turning on, is not, since the readings
+  after it agree with it.
+
+| Measure | Plausible range | Spike size |
+| --- | --- | --- |
+| `temp` | -40 to 140 °F | 10 °F |
+| `humid` | 0 to 100 % RH | 15 % RH |
+
+Other measures are not checked. The rules are in `src/faults.rs`; after
+changing them, run `sensors analyze --rebuild` to check every reading again.
+
+A reading needs a neighbor after it to be a spike, so the newest reading is
+checked again when the next one arrives. Each run says how many faulty
+readings there are in all: `Flagged N faulty readings in all, left out of
+graphs`.
+
 ## Time zones
 
 Timestamps are UTC, but irssi logs in the logging computer's time zone. Each
