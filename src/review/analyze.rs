@@ -1,6 +1,6 @@
-//! Analyzing from the browser: reads new lines from the log folders the
-//! imported files came from, then the readings in them, as
-//! `sensors analyze` does. It runs in the background while its page shows
+//! Analyzing from the browser: reads new lines of the saved channels from
+//! the log folders the imported files came from, then the readings in them,
+//! as `sensors analyze` does. It runs in the background while its page shows
 //! each stage and how far it has come, reloading itself, with no script.
 
 use std::collections::BTreeSet;
@@ -20,10 +20,11 @@ use serde::Deserialize;
 
 use super::layout::{self, number};
 use super::{App, Flash, PageResult, internal, with_db};
-use crate::analysis;
+use crate::channels::Removed;
 use crate::db::{self, ImportSummary};
 use crate::progress::{self, Progress, Report, SharedReport};
 use crate::readings::BuildSummary;
+use crate::{analysis, channels};
 
 /// Seconds between reloads of the page while an analysis runs.
 const RELOAD_SECONDS: u32 = 2;
@@ -90,10 +91,11 @@ async fn analyze_page(State(app): State<App>, Query(flash): Query<Flash>) -> Pag
     let status = status();
     with_db(&app, move |conn| {
         let folders = log_folders(conn).map_err(internal)?;
+        let channels = channels::load(conn).map_err(internal)?;
         let running = status
             .as_ref()
             .is_some_and(|status| status.outcome.is_none());
-        let body = page(&folders, status.as_ref());
+        let body = page(&folders, &channels, status.as_ref());
         Ok(if running {
             layout::reloading_page("Analyze", &flash, body, RELOAD_SECONDS)
         } else {
@@ -176,14 +178,25 @@ fn run(path: &Path, force: bool, progress: &mut Progress) -> Outcome {
         );
     }
 
-    let outcome = analysis::run(&mut conn, &found, force, progress)
+    let outcome = analysis::run(&mut conn, &found, None, force, progress)
         .map_err(|err| format!("Analyzing: {err}"))?;
+    if outcome.removed.files > 0 {
+        said.push(removed_text(&outcome.removed));
+    }
     said.push(import_text(&outcome.import));
     for (file, err) in &outcome.import.errors {
         said.push(format!("Could not import {}: {err}", file.display()));
     }
     said.push(build_text(&outcome.build));
     Ok(said)
+}
+
+fn removed_text(removed: &Removed) -> String {
+    format!(
+        "Removed {} of other channels and private messages, with {}.",
+        count(removed.files, "log file"),
+        count(removed.lines, "line"),
+    )
 }
 
 fn import_text(summary: &ImportSummary) -> String {
@@ -228,15 +241,26 @@ fn count(n: u64, noun: &str) -> String {
     )
 }
 
-fn page(folders: &[PathBuf], status: Option<&Status>) -> Markup {
+fn page(folders: &[PathBuf], channels: &[String], status: Option<&Status>) -> Markup {
     let running = status.is_some_and(|status| status.outcome.is_none());
     html! {
         h1 { "Analyze" }
         p.note {
-            "Reads new lines from the log folders below, as " code { "sensors analyze" }
-            " does with them, and the readings in them. Only what was added since the last "
-            "import is read, so it is quick unless a lot was added. Progress also shows in "
-            "the terminal running " code { "sensors review" } "."
+            "Reads new lines of the channels below from the log folders, as "
+            code { "sensors analyze" } " does with them, and the readings in them. Only what "
+            "was added since the last import is read, so it is quick unless a lot was added. "
+            "Progress also shows in the terminal running " code { "sensors review" } "."
+        }
+        h2 { "Channels" }
+        ul {
+            @for channel in channels {
+                li { (channel) }
+            }
+        }
+        p.note {
+            "Only these channels are imported, and other channels already imported are "
+            "removed. Change them with " code { "sensors analyze --channel '#name' FOLDER" }
+            ", repeating " code { "--channel" } " for each."
         }
         h2 { "Log folders" }
         @if folders.is_empty() {
@@ -383,7 +407,8 @@ mod tests {
             "Read 2 messages: 2 new readings and 0 new markers."
         );
         let report = report.lock().unwrap().clone();
-        assert!(report.notes[0].starts_with("Looking for log files in"));
+        assert_eq!(report.notes[0], "Processing #greenhouse");
+        assert!(report.notes[1].starts_with("Looking for log files in"));
         assert!(
             report
                 .done
@@ -402,6 +427,18 @@ mod tests {
         assert_eq!(
             said[1],
             "Read 2 messages: 2 new readings and 0 new markers."
+        );
+    }
+
+    #[test]
+    fn says_what_was_removed() {
+        let removed = Removed {
+            files: 270,
+            lines: 3_412_345,
+        };
+        assert_eq!(
+            removed_text(&removed),
+            "Removed 270 log files of other channels and private messages, with 3,412,345 lines."
         );
     }
 
@@ -425,6 +462,7 @@ mod tests {
     #[test]
     fn shows_an_analysis_under_way_and_when_done() {
         let folders = [PathBuf::from("/logs/irclogs")];
+        let channels = ["#greenhouse".to_string()];
         let mut status = Status {
             report: Report {
                 done: vec![Done {
@@ -443,14 +481,15 @@ mod tests {
             elapsed: Duration::from_secs(5),
             outcome: None,
         };
-        let running = page(&folders, Some(&status)).into_string();
+        let running = page(&folders, &channels, Some(&status)).into_string();
         assert!(running.contains(r#"<progress max="160" value="40">25%</progress>"#));
         assert!(running.contains("<code>/logs/irclogs</code>"));
+        assert!(running.contains("<li>#greenhouse</li>"));
         assert!(running.contains("<td>Importing</td>"));
         assert!(!running.contains(r#"action="/analyze""#), "no second start");
 
         status.outcome = Some(Ok(vec!["Imported 12 lines.".into()]));
-        let done = page(&folders, Some(&status)).into_string();
+        let done = page(&folders, &channels, Some(&status)).into_string();
         assert!(done.contains("<p>Imported 12 lines.</p>"));
         assert!(!done.contains("<progress"));
         assert!(done.contains(r#"action="/analyze""#));

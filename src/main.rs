@@ -1,4 +1,5 @@
 mod analysis;
+mod channels;
 mod db;
 mod discover;
 mod history;
@@ -31,13 +32,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Import irssi log folders into the database, read the sensor readings
-    /// in them, and list each sensor's measures
+    /// Import the logs of the channels to process into the database, read
+    /// the sensor readings in them, and list each sensor's measures
     Analyze {
         /// Log folders to read, one per irssi instance, each laid out as
         /// <folder>/<network tag>/<channel or nick>.log
         #[arg(required = true, value_name = "LOG_ROOT")]
         roots: Vec<PathBuf>,
+
+        /// A channel to process, instead of the saved ones, which start as
+        /// #greenhouse. Repeat it for more; they are saved for later runs, and
+        /// lines of other channels are removed. Quote it in the shell:
+        /// --channel '#greenhouse'
+        #[arg(long = "channel", value_name = "CHANNEL")]
+        channels: Vec<String>,
 
         /// SQLite database to import into. It is created if it does not exist.
         #[arg(long, value_name = "FILE", default_value = DEFAULT_DB)]
@@ -47,6 +55,13 @@ enum Command {
         /// from the lines imported since the last run
         #[arg(long)]
         rebuild: bool,
+    },
+
+    /// Shrink the database file after removing lines, by rewriting it
+    Compact {
+        /// SQLite database to compact
+        #[arg(long, value_name = "FILE", default_value = DEFAULT_DB)]
+        db: PathBuf,
     },
 
     /// Review the readings and log lines in a web browser, on this computer
@@ -64,7 +79,16 @@ enum Command {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Analyze { roots, db, rebuild } => finish(analyze(&roots, &db, rebuild)),
+        Command::Analyze {
+            roots,
+            channels,
+            db,
+            rebuild,
+        } => {
+            let channels = (!channels.is_empty()).then_some(channels.as_slice());
+            finish(analyze(&roots, channels, &db, rebuild))
+        }
+        Command::Compact { db } => finish(compact(&db)),
         Command::Review { port, db } => finish(review::run(&db, port)),
     }
 }
@@ -84,13 +108,18 @@ fn open(db_path: &Path) -> db::Result<Connection> {
     db::open(db_path).map_err(|err| format!("opening database {}: {err}", db_path.display()).into())
 }
 
-/// Imports the lines added to the log files since the last run, reads the
-/// readings in them, and lists the series. A replaced file, or `rebuild`,
-/// reads the readings from every line again.
-fn analyze(roots: &[PathBuf], db_path: &Path, rebuild: bool) -> db::Result<()> {
+/// Imports the lines added to the channels' log files since the last run,
+/// reads the readings in them, and lists the series. `channels`, when given,
+/// replaces the saved channels.
+fn analyze(
+    roots: &[PathBuf],
+    channels: Option<&[String]>,
+    db_path: &Path,
+    rebuild: bool,
+) -> db::Result<()> {
     let mut conn = open(db_path)?;
     let mut progress = Progress::to_stderr();
-    let outcome = analysis::run(&mut conn, roots, rebuild, &mut progress)?;
+    let outcome = analysis::run(&mut conn, roots, channels, rebuild, &mut progress)?;
     report::import_summary(&mut io::stderr().lock(), db_path, &outcome.import)?;
     report::build_summary(&mut io::stderr().lock(), &outcome.build)?;
     eprintln!();
@@ -103,4 +132,23 @@ fn analyze(roots: &[PathBuf], db_path: &Path, rebuild: bool) -> db::Result<()> {
         Err(err) if err.kind() != io::ErrorKind::BrokenPipe => Err(err.into()),
         _ => Ok(()),
     }
+}
+
+fn compact(db_path: &Path) -> db::Result<()> {
+    let conn = open(db_path)?;
+    let size = || {
+        std::fs::metadata(db_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+    };
+    let before = size();
+    let mut progress = Progress::to_stderr();
+    progress.stage("Compacting the database", 0, progress::Unit::Bytes);
+    conn.execute_batch("VACUUM")?;
+    progress.done(&format!(
+        "{} down to {}",
+        progress::bytes(before),
+        progress::bytes(size())
+    ));
+    Ok(())
 }

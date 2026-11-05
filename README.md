@@ -40,8 +40,10 @@ Import your irssi log folders, one per irssi instance:
 sensors analyze ~/irclogs
 ```
 
-The first run imports everything and can take a while for years of logs; it
-shows each step as it goes. Later runs only read the lines added since. Each
+Only `#greenhouse` is imported, unless you name other channels with
+`--channel '#name'`, which is saved for later runs. The first run imports
+the whole channel and can take a while for years of logs; it shows each step
+as it goes. Later runs only read the lines added since. Each
 run reads the readings in the new lines and ends with a list of every
 sensor's measures:
 
@@ -62,8 +64,8 @@ lines later, so the command line is only needed for the first import.
 
 ## Documentation
 
-- [Logs and importing](docs/logs.md): the log layout `sensors` expects and
-  how importing works.
+- [Logs and importing](docs/logs.md): the log layout `sensors` expects, the
+  channels to process, and how importing works.
 - [Readings](docs/readings.md): which JSON lines are readings, markers, time
   zones and rebuilding.
 - [Reviewing in a browser](docs/review.md): the pages of `sensors review`.

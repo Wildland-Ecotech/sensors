@@ -11,6 +11,9 @@
 //!
 //! The reading tables are filled by the `readings` module, and built again
 //! from the events whenever needed.
+//!
+//! The `channels` table holds the channels to process, which nothing
+//! rebuilds.
 
 use std::error::Error;
 use std::fs::{self, File};
@@ -37,7 +40,7 @@ const HEAD_LEN: u64 = 1024;
 /// The schema, as the steps that build it. SQLite's `user_version` stores how
 /// many steps a database has had, so an older database is brought up to date
 /// by running the steps it is missing.
-const MIGRATIONS: [&str; 3] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+const MIGRATIONS: [&str; 4] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE files (
@@ -180,6 +183,17 @@ FROM events e JOIN files f ON f.id = e.file_id
 WHERE e.kind IN ('message', 'action') AND f.kind = 'channel' AND e.date IS NOT NULL
   AND e.id <= (SELECT ifnull(max(last_event_id), 0) FROM reading_state)
 GROUP BY f.tag, f.target, e.date;
+";
+
+const SCHEMA_V4: &str = "
+-- The channels to process, as sensors analyze --channel saved them. Only
+-- their log files are imported; the next analysis removes the rest.
+CREATE TABLE channels (
+    name TEXT PRIMARY KEY COLLATE NOCASE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT INTO channels (name) VALUES ('#greenhouse');
 ";
 
 const INSERT_EVENT: &str = "
@@ -804,6 +818,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows, 0);
+        let channels: String = conn
+            .query_row("SELECT group_concat(name) FROM channels", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(channels, "#greenhouse");
     }
 
     #[test]

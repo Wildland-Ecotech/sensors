@@ -22,8 +22,10 @@ mode, and work without JavaScript.
   with filters for a channel, a day and text the lines contain. Below them,
   every day with lines, by month, links to that day. Private messages are
   left out.
-- **Analyze:** the log folders the imported files came from, and
-  **Analyze now**, which does what `sensors analyze` does with them. Tick
+- **Analyze:** the channels to process, the log folders the imported files
+  came from, and **Analyze now**, which does what `sensors analyze` does
+  with them. The channels are changed with `sensors analyze --channel`, see
+  [Channels](logs.md#channels). Tick
   **Read the readings from every line again** to do what `--rebuild` does.
   It runs in the background, and the page reloads itself with a progress bar
   for each step until it is done. Other pages keep working meanwhile,

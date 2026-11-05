@@ -22,6 +22,31 @@ Files starting with `#`, `&`, `!` or `+` are channels; other `.log` files are
 private messages. Anything else is skipped, and each run lists what it
 skipped and why.
 
+## Channels
+
+Only the log files of the channels to process are imported: `#greenhouse`
+unless you name others. Other channels and private messages are left out,
+and each run says how many files it left out. Name the channels with
+`--channel`, once for each, quoted, since the shell takes `#` for the start
+of a comment:
+
+```bash
+sensors analyze --channel '#greenhouse' --channel '#garden' ~/irclogs
+```
+
+The channels are saved in the database, so later runs, and **Analyze now**
+in `sensors review`, process the same ones without naming them again.
+Channel names match ignoring case.
+
+When the channels change, the next run removes the files and lines of
+channels no longer named, and reads the readings again from the lines that
+remain. The database file keeps its size until `sensors compact` rewrites
+it, which needs free disk space about its size:
+
+```bash
+sensors compact
+```
+
 ## Log format
 
 `sensors` expects irssi's default theme and log settings:
