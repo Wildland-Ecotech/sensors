@@ -193,6 +193,37 @@ form.inline {
     margin: 0.25rem 1rem 0.25rem 0;
 }
 
+/* Filters above a table, each with its label above it. */
+form.search {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1rem;
+    align-items: end;
+    margin: 0.5rem 0;
+}
+
+form.search label {
+    display: grid;
+    gap: 0.2rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+input[type="text"],
+input[type="date"],
+select {
+    font: inherit;
+    color: var(--text);
+    background: var(--background);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+}
+
+input[type="text"] {
+    min-width: 12rem;
+}
+
 /* A checkbox sits beside its text. */
 form label:has(input[type="checkbox"]) {
     display: flex;
@@ -213,4 +244,25 @@ button {
 
 button:hover {
     filter: brightness(1.1);
+}
+
+/* Links to newer and older pages of lines. */
+.pager {
+    display: flex;
+    gap: 1rem;
+}
+
+/* The days of a month, folded. */
+details {
+    margin-top: 0.75rem;
+}
+
+summary {
+    cursor: pointer;
+    color: var(--muted);
+}
+
+/* JSON lines are long; they wrap anywhere rather than widen the table. */
+table.lines td.wrap {
+    overflow-wrap: anywhere;
 }

@@ -37,7 +37,7 @@ const HEAD_LEN: u64 = 1024;
 /// The schema, as the steps that build it. SQLite's `user_version` stores how
 /// many steps a database has had, so an older database is brought up to date
 /// by running the steps it is missing.
-const MIGRATIONS: [&str; 2] = [SCHEMA_V1, SCHEMA_V2];
+const MIGRATIONS: [&str; 3] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE files (
@@ -157,6 +157,29 @@ CREATE TABLE reading_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_event_id INTEGER NOT NULL
 );
+";
+
+const SCHEMA_V3: &str = "
+-- Messages and actions said in each channel each day, counted with the
+-- readings, so the history page reads a row a day instead of every line.
+CREATE TABLE channel_days (
+    -- The network tag folder and channel of the log file.
+    tag TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    -- YYYY-MM-DD, in the logs' time zone.
+    date TEXT NOT NULL,
+    lines INTEGER NOT NULL,
+    PRIMARY KEY (tag, channel, date)
+) WITHOUT ROWID;
+
+-- Count the lines readings were already read from. Later builds add the
+-- lines imported after them.
+INSERT INTO channel_days (tag, channel, date, lines)
+SELECT f.tag, f.target, e.date, count(*)
+FROM events e JOIN files f ON f.id = e.file_id
+WHERE e.kind IN ('message', 'action') AND f.kind = 'channel' AND e.date IS NOT NULL
+  AND e.id <= (SELECT ifnull(max(last_event_id), 0) FROM reading_state)
+GROUP BY f.tag, f.target, e.date;
 ";
 
 const INSERT_EVENT: &str = "
@@ -774,12 +797,43 @@ mod tests {
                         + (SELECT count(*) FROM reading_hours)
                         + (SELECT count(*) FROM reading_markers)
                         + (SELECT count(*) FROM log_offsets)
-                        + (SELECT count(*) FROM reading_state)",
+                        + (SELECT count(*) FROM reading_state)
+                        + (SELECT count(*) FROM channel_days)",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn counts_the_days_of_lines_already_read_when_upgrading() {
+        let (root, log, mut conn) = setup("db-upgrade-days");
+        append(
+            &log,
+            "00:05 < greenhouse> {}\n00:06  * rachel checks the vents\n",
+        );
+        run(&root, &mut conn);
+        crate::readings::build(&mut conn, false).unwrap();
+        let days = |conn: &Connection| -> Vec<(String, i64)> {
+            let mut stmt = conn
+                .prepare("SELECT date, lines FROM channel_days ORDER BY date")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let built = days(&conn);
+        assert_eq!(
+            built,
+            [("2026-11-03".to_string(), 1), ("2026-11-04".to_string(), 2)]
+        );
+
+        // The upgrade counts the same days from the lines already read.
+        conn.execute_batch(&format!("DROP TABLE channel_days; {SCHEMA_V3}"))
+            .unwrap();
+        assert_eq!(days(&conn), built);
     }
 
     #[test]

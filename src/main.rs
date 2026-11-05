@@ -1,6 +1,7 @@
 mod analysis;
 mod db;
 mod discover;
+mod history;
 mod irssi;
 mod progress;
 mod readings;

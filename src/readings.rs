@@ -11,6 +11,9 @@
 //! reading from the `inside` sensor. A JSON object with a timestamp and no
 //! readings, such as `{"testBegin":true,...}`, is kept as a marker.
 //!
+//! The same pass counts the messages and actions said in each channel each
+//! day, in `channel_days`, for the history page.
+//!
 //! Readings are built from the events after each import. Only the events
 //! added since the last build are read, unless a file was replaced or a
 //! rebuild was asked for, when everything is read again. Each hour's
@@ -218,6 +221,7 @@ pub fn build_with_progress(
              DELETE FROM reading_markers;
              DELETE FROM log_offsets;
              DELETE FROM sensor_series;
+             DELETE FROM channel_days;
              DELETE FROM reading_state;",
         )?;
         0
@@ -248,6 +252,7 @@ pub fn build_with_progress(
     builder.read_events(&tx, last, newest, progress)?;
     builder.save_hours(&tx)?;
     builder.save_offsets(&tx)?;
+    builder.save_days(&tx)?;
     tx.execute(
         "INSERT INTO reading_state (id, last_event_id) VALUES (1, ?1)
          ON CONFLICT (id) DO UPDATE SET last_event_id = excluded.last_event_id",
@@ -277,6 +282,8 @@ struct Builder {
     touched: HashSet<(i64, i64)>,
     /// Lines seen in each hour with each UTC offset.
     offsets: HashMap<(i64, i64), i64>,
+    /// Messages and actions said in each tag, channel and day.
+    days: HashMap<(String, String, String), i64>,
     summary: BuildSummary,
 }
 
@@ -302,11 +309,13 @@ impl Builder {
             series,
             touched: HashSet::new(),
             offsets: HashMap::new(),
+            days: HashMap::new(),
             summary: BuildSummary::default(),
         })
     }
 
-    /// Reads the channel messages with ids after `last`, up to `newest`.
+    /// Reads the channel messages and actions with ids after `last`, up to
+    /// `newest`, counting them by day. Only messages can hold readings.
     fn read_events(
         &mut self,
         tx: &Transaction<'_>,
@@ -315,9 +324,10 @@ impl Builder {
         progress: &mut Progress,
     ) -> Result<()> {
         let mut events = tx.prepare(
-            "SELECT e.id, f.tag, f.target, e.nick, e.date, e.time, e.text
+            "SELECT e.id, f.tag, f.target, e.nick, e.date, e.time, e.text, e.kind
              FROM events e JOIN files f ON f.id = e.file_id
-             WHERE e.id > ?1 AND e.id <= ?2 AND e.kind = 'message' AND f.kind = 'channel'
+             WHERE e.id > ?1 AND e.id <= ?2 AND e.kind IN ('message', 'action')
+               AND f.kind = 'channel'
              ORDER BY e.id",
         )?;
         let mut insert_reading = tx.prepare_cached(
@@ -338,8 +348,8 @@ impl Builder {
             let date: Option<String> = row.get(4)?;
             let time: Option<String> = row.get(5)?;
             let text: Option<String> = row.get(6)?;
+            let kind: String = row.get(7)?;
 
-            self.summary.messages += 1;
             read += 1;
             if read.is_multiple_of(PROGRESS_EVENTS) {
                 let readings = self.summary.readings;
@@ -348,6 +358,16 @@ impl Builder {
                 });
             }
 
+            if let Some(date) = &date {
+                *self
+                    .days
+                    .entry((tag.clone(), channel.clone(), date.clone()))
+                    .or_default() += 1;
+            }
+            if kind != "message" {
+                continue;
+            }
+            self.summary.messages += 1;
             let (Some(nick), Some(text)) = (nick, text) else {
                 continue;
             };
@@ -426,6 +446,18 @@ impl Builder {
         )?;
         for &(series, hour) in &self.touched {
             count.execute(params![series, hour, hour * HOUR, (hour + 1) * HOUR])?;
+        }
+        Ok(())
+    }
+
+    /// Adds the messages and actions said each day to `channel_days`.
+    fn save_days(&self, tx: &Transaction<'_>) -> Result<()> {
+        let mut add = tx.prepare_cached(
+            "INSERT INTO channel_days (tag, channel, date, lines) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (tag, channel, date) DO UPDATE SET lines = lines + excluded.lines",
+        )?;
+        for ((tag, channel, date), &lines) in &self.days {
+            add.execute(params![tag, channel, date, lines])?;
         }
         Ok(())
     }
@@ -596,6 +628,7 @@ mod tests {
 13:47 < greenhouse> {"sensor":"outside","temp":"65.48","humid":"45.80","timestamp":"2026-11-03T20:47:13.078Z"}
 13:47 < greenhouse> {"sensor":"inside","temp":"68.54","humid":"35.50","timestamp":"2026-11-03T20:47:13.131Z"}
 13:47 < rachel> looks good
+13:47  * rachel waters the tomatoes
 "#;
 
     fn setup(name: &str) -> (TempDir, Connection) {
@@ -678,6 +711,14 @@ mod tests {
         assert_eq!(series[0].first, Some(utc(20, 46, 43, 51)));
         assert_eq!(series[0].last, Some(utc(20, 47, 13, 131)));
         assert_eq!(series[3].latest, Some(65.48));
+
+        // The action counts as a line of the day, but not as a message.
+        let days: (String, String, i64) = conn
+            .query_row("SELECT channel, date, lines FROM channel_days", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(days, ("#greenhouse".into(), "2026-11-03".into(), 7));
     }
 
     #[test]
@@ -710,10 +751,16 @@ mod tests {
         );
         assert_eq!(hours(&conn)[1], "inside temp 3 68.48 68.36 68.54");
 
-        // Reading everything again gives the same hours.
+        // Reading everything again gives the same hours and days.
+        let lines = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT sum(lines) FROM channel_days", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(lines(&conn), 10);
         let before = hours(&conn);
         let summary = build(&mut conn, true).unwrap();
         assert_eq!((summary.readings, summary.repeated), (10, 2));
         assert_eq!(hours(&conn), before);
+        assert_eq!(lines(&conn), 10);
     }
 }

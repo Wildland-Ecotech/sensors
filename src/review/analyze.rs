@@ -365,7 +365,7 @@ mod tests {
         let mut conn = db::open(&path).unwrap();
         let inventory = discover::discover(std::slice::from_ref(&root.0)).unwrap();
         db::import(&mut conn, &inventory.files);
-        assert_eq!(log_folders(&conn).unwrap(), [root.0.clone()]);
+        assert_eq!(log_folders(&conn).unwrap(), std::slice::from_ref(&root.0));
 
         // A line added since: imported, and its readings read.
         OpenOptions::new()

@@ -18,8 +18,8 @@ your computer can open.
 ## Status
 
 Early development. It imports irssi logs into the database, reads the
-sensor readings in them, and shows each sensor's latest readings in a web
-interface. Next are the raw lines by day, then graphs of the readings.
+sensor readings in them, and shows each sensor's latest readings and the
+raw log lines by day in a web interface. Next are graphs of the readings.
 
 ## Install
 

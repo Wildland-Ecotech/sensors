@@ -12,6 +12,7 @@
 //! The server comes from wot's `wot review`.
 
 mod analyze;
+mod history;
 mod layout;
 mod pages;
 
@@ -54,6 +55,7 @@ pub fn run(db_path: &Path, port: u16) -> db::Result<()> {
     };
     let router = Router::new()
         .merge(pages::routes())
+        .merge(history::routes())
         .merge(analyze::routes())
         .route("/style.css", get(style))
         .fallback(not_found)
@@ -140,10 +142,30 @@ struct Flash {
     error: Option<String>,
 }
 
+/// A form field, or `None` when it was left blank.
+fn filled(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 async fn style() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE)
 }
 
 async fn not_found() -> PageError {
     PageError::not_found("There is no page here.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn treats_blank_fields_as_missing() {
+        assert_eq!(filled(&Some("  ".into())), None);
+        assert_eq!(filled(&Some(" x ".into())), Some("x"));
+        assert_eq!(filled(&None), None);
+    }
 }

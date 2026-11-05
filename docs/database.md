@@ -34,9 +34,10 @@ to 5 seconds for another one to finish.
 | `reading_markers` | JSON line without readings | `tag`, `channel`, `nick`, `at`, `text` |
 | `log_offsets` | hour and UTC offset | `hour`, `minutes` (ahead of UTC, such as `-420`), `lines` seen with it |
 | `reading_state` | (one row) | `last_event_id`, the last event read for readings |
+| `channel_days` | channel and day | `tag`, `channel`, `date`, `lines`: messages and actions said |
 
-The reading tables are built from the events after each import, as
-[Readings](readings.md) describes. `at` is milliseconds since 1970 UTC, and
+The reading tables and `channel_days` are built from the events after each
+import, as [Readings](readings.md) describes. `at` is milliseconds since 1970 UTC, and
 `hour` is hours since 1970 UTC, `at / 3600000`. A mean over any stretch of
 hours is `sum(total) / sum(readings)`.
 

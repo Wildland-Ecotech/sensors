@@ -17,6 +17,11 @@ mode, and work without JavaScript.
   each sensor's measures with their latest reading, when it was taken, how
   many readings there are, and since when. Times are as the logs show them,
   see [Time zones](readings.md#time-zones). **Analyze now** reads new lines.
+- **History:** the lines said in channels one day at a time, the way irssi
+  shows them, newest first, 200 to a page. It opens on the most recent day,
+  with filters for a channel, a day and text the lines contain. Below them,
+  every day with lines, by month, links to that day. Private messages are
+  left out.
 - **Analyze:** the log folders the imported files came from, and
   **Analyze now**, which does what `sensors analyze` does with them. Tick
   **Read the readings from every line again** to do what `--rebuild` does.

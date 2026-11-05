@@ -1,5 +1,5 @@
-//! The page frame shared by every review page, and small helpers for
-//! numbers.
+//! The page frame shared by every review page, and small helpers for links
+//! and numbers.
 
 use maud::{DOCTYPE, Markup, html};
 
@@ -34,6 +34,7 @@ fn frame(title: &str, flash: &Flash, body: Markup, reload: Option<u32>) -> Marku
                     nav {
                         a.brand href="/" { "sensors review" }
                         a href="/" { "Overview" }
+                        a href="/history" { "History" }
                         a href="/analyze" { "Analyze" }
                     }
                 }
@@ -58,6 +59,20 @@ fn frame(title: &str, flash: &Flash, body: Markup, reload: Option<u32>) -> Marku
     }
 }
 
+/// Percent-encodes a query string value, leaving only unreserved characters.
+pub fn url_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// A count with thousands separators, such as `12,345`.
 pub fn number(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
@@ -77,6 +92,13 @@ pub fn number(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_values_for_links() {
+        assert_eq!(url_encode("#greenhouse"), "%23greenhouse");
+        assert_eq!(url_encode("a b&c=d"), "a%20b%26c%3Dd");
+        assert_eq!(url_encode("2026-11-03"), "2026-11-03");
+    }
 
     #[test]
     fn formats_numbers() {

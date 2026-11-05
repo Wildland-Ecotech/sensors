@@ -63,7 +63,9 @@ sensors analyze --rebuild ~/irclogs
 ```
 
 Each hour's count, mean, lowest and highest value are kept too, so graphs of
-months or years read a row an hour instead of every reading.
+months or years read a row an hour instead of every reading. The same pass
+counts the messages and actions said in each channel each day, for the
+[History](review.md#pages) page.
 
 ## The sensor list
 
