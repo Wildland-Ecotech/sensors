@@ -205,7 +205,7 @@ struct Group {
 }
 
 /// The measures with a known order come first: temperature, then humidity.
-fn measure_rank(measure: &str) -> (usize, &str) {
+pub fn measure_rank(measure: &str) -> (usize, &str) {
     const KNOWN: [&str; 2] = ["temp", "humid"];
     let rank = KNOWN
         .iter()

@@ -1,7 +1,7 @@
-//! The sensors page: a chart of each measure over a calendar period, every
-//! nick in the channel together, with a table of each sensor's last reading
-//! and its lowest, mean and highest over the period, and CSV downloads of
-//! it. Faulty readings are left out of all of them, and flagged unless the
+//! The sensors page: each sensor's newest readings, then a chart of each
+//! measure over a calendar period, every nick in the channel together, with
+//! a table of each sensor's last reading and its lowest, mean and highest
+//! over the period, and CSV downloads of it. Faulty readings are left out of all of them, and flagged unless the
 //! address says `faults=hide`. The address's `at` is a date in the period to
 //! show; without it, the period holding the newest reading.
 //!
@@ -12,7 +12,11 @@
 //! history.
 //!
 //! The live site serves these pages and nothing else, with the newest
-//! period at `/` too.
+//! period at `/` too. Showing the newest period, its page reloads itself
+//! every `FOLLOW_SECONDS` to show new readings.
+
+use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::{Query, State};
@@ -23,14 +27,19 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use maud::{Markup, html};
 use serde::Deserialize;
 
-use super::chart::{self, Options, measure_name, sensor_name, slot};
+use super::chart::{self, Options, measure_name, sensor_name, slot, slot_among};
 use super::layout::{self, number, url_encode};
 use super::{App, Flash, PageError, PageResult, Site, filled, internal, site, with_db};
 use crate::faults::Reason;
 use crate::graphs::{
-    self, CLOSE_UP_SIDE, Graph, Measure, Period, Range, date_of, decimal, time_text,
+    self, CLOSE_UP_SIDE, Graph, MINUTE, Measure, Period, Range, date_of, decimal, measure_rank,
+    time_text,
 };
-use crate::readings::{HOUR, Offsets};
+use crate::readings::{self, HOUR, Offsets};
+
+/// How often the live site's page of the newest period reloads, about as
+/// often as the greenhouse posts.
+const FOLLOW_SECONDS: u32 = 30;
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
@@ -277,33 +286,164 @@ async fn sensors_page(
             return Ok(layout::page(
                 "Sensors",
                 &flash,
-                page(site(), &channels, None, None),
+                page(site(), &channels, None, None, &Newest::default()),
             ));
         };
+        let newest = newest(conn, &shown.channel, &offsets, now())?;
         let graph =
             Graph::build(conn, &shown.channel, &shown.period, &offsets, None).map_err(internal)?;
         let title = format!("{} in {}", period_name(&shown.period), shown.channel);
-        Ok(layout::page(
-            &title,
-            &flash,
-            page(
-                site(),
-                &channels,
-                Some((&shown, query.at(), query.faults())),
-                graph.as_ref(),
-            ),
-        ))
+        let body = page(
+            site(),
+            &channels,
+            Some((&shown, query.at(), query.faults())),
+            graph.as_ref(),
+            &newest,
+        );
+        // The live site follows new readings while they would show.
+        if site() == Site::Live && shown.period.end > shown.last {
+            Ok(layout::following_page(&title, &flash, body, FOLLOW_SECONDS))
+        } else {
+            Ok(layout::page(&title, &flash, body))
+        }
     })
     .await
 }
 
+/// Now, in milliseconds since 1970 UTC.
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
+}
+
+/// Each sensor's newest readings in a channel, faulty ones left out.
+#[derive(Default)]
+struct Newest {
+    /// When the page was built, in milliseconds since 1970 UTC, to say how
+    /// long ago the readings are.
+    now: i64,
+    /// Sorted, as graphs list sensors, so their colors match.
+    sensors: Vec<NewestSensor>,
+}
+
+struct NewestSensor {
+    sensor: String,
+    /// The newest of its readings, in milliseconds since 1970 UTC, and as
+    /// the logs show times.
+    at: i64,
+    local: String,
+    /// Each measure's newest value, temperature first.
+    values: Vec<(String, f64)>,
+}
+
+/// The newest reading of each sensor's measures, of every nick together.
+fn newest(
+    conn: &rusqlite::Connection,
+    channel: &str,
+    offsets: &Offsets,
+    now: i64,
+) -> Result<Newest, PageError> {
+    let mut found: BTreeMap<(String, String), (i64, f64)> = BTreeMap::new();
+    for series in readings::series(conn).map_err(internal)? {
+        if !series.channel.eq_ignore_ascii_case(channel) {
+            continue;
+        }
+        if let (Some(at), Some(value)) = (series.last, series.latest) {
+            let newest = found
+                .entry((series.sensor, series.measure))
+                .or_insert((at, value));
+            if at > newest.0 {
+                *newest = (at, value);
+            }
+        }
+    }
+    let mut sensors: Vec<NewestSensor> = Vec::new();
+    for ((sensor, measure), (at, value)) in found {
+        match sensors.last_mut() {
+            Some(last) if last.sensor == sensor => {
+                last.at = last.at.max(at);
+                last.values.push((measure, value));
+            }
+            _ => sensors.push(NewestSensor {
+                sensor,
+                at,
+                local: String::new(),
+                values: vec![(measure, value)],
+            }),
+        }
+    }
+    for sensor in &mut sensors {
+        sensor
+            .values
+            .sort_by_key(|(measure, _)| measure_rank(measure).0);
+        sensor.local = offsets
+            .local(sensor.at)
+            .map(|at| at.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+    }
+    Ok(Newest { now, sensors })
+}
+
+/// How long before `now` a time was, such as `just now`, `3 minutes ago`,
+/// `5 hours ago` or `2 days ago`.
+fn ago(now: i64, at: i64) -> String {
+    let minutes = (now - at).max(0) / MINUTE;
+    let (count, unit) = if minutes < 60 {
+        (minutes, "minute")
+    } else if minutes < 48 * 60 {
+        (minutes / 60, "hour")
+    } else {
+        (minutes / (24 * 60), "day")
+    };
+    match count {
+        0 => "just now".to_string(),
+        1 => format!("1 {unit} ago"),
+        _ => format!("{count} {unit}s ago"),
+    }
+}
+
+/// Each sensor's newest readings, with when they were taken.
+fn newest_readings(newest: &Newest) -> Markup {
+    let names: Vec<String> = newest
+        .sensors
+        .iter()
+        .map(|sensor| sensor.sensor.clone())
+        .collect();
+    html! {
+        @if !newest.sensors.is_empty() {
+            section.newest aria-label="Newest readings" {
+                @for sensor in &newest.sensors {
+                    div.newest-sensor {
+                        div.newest-name {
+                            span class=(format!("line-key s{}", slot_among(&names, &sensor.sensor))) {}
+                            " " (sensor_name(&sensor.sensor))
+                        }
+                        div.newest-values {
+                            @for (measure, value) in &sensor.values {
+                                @let (name, unit) = measure_name(measure);
+                                span title=(name) {
+                                    strong { (decimal(*value)) }
+                                    @if !unit.is_empty() { " " (unit) }
+                                }
+                            }
+                        }
+                        p.newest-time { (sensor.local) " · " (ago(newest.now, sensor.at)) }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The page for a period: what is shown, the date the address asked for, if
-/// any, and whether faulty readings are flagged.
+/// any, and whether faulty readings are flagged, under the newest readings.
 fn page(
     site: Site,
     channels: &[String],
     shown: Option<(&Shown, Option<NaiveDate>, bool)>,
     graph: Option<&Graph>,
+    newest: &Newest,
 ) -> Markup {
     let Some((shown, at, faults)) = shown else {
         return html! {
@@ -349,6 +489,7 @@ fn page(
         .sum();
     html! {
         h1 { "Sensors in " (channel) }
+        (newest_readings(newest))
         div.filters {
             div.ranges role="group" aria-label="Range" {
                 @for each in Range::EVERY {
@@ -760,8 +901,13 @@ async fn download(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use crate::discover::tests::TempDir;
     use crate::graphs::{Fault, Line, Point, midnight};
+    use crate::progress::Progress;
+    use crate::{analysis, db};
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()
@@ -897,13 +1043,31 @@ mod tests {
             first: first_reading,
             last: last_reading,
         };
+        // Read three minutes after the inside sensor's newest reading.
+        let newest = Newest {
+            now: second + 7 * HOUR + 3 * graphs::MINUTE,
+            sensors: vec![NewestSensor {
+                sensor: "inside".into(),
+                at: second + 7 * HOUR,
+                local: "2026-11-04 01:00".into(),
+                values: vec![("temp".into(), 51.44), ("humid".into(), 49.6)],
+            }],
+        };
         let html = page(
             Site::Review,
             &channels,
             Some((&shown, None, true)),
             Some(&graph),
+            &newest,
         )
         .into_string();
+        assert!(html.contains(
+            r#"<div class="newest-name"><span class="line-key s1"></span> inside</div>"#
+        ));
+        assert!(html.contains(
+            r#"<span title="Temperature"><strong>51.44</strong> °F</span><span title="Humidity"><strong>49.6</strong> % RH</span>"#
+        ));
+        assert!(html.contains("2026-11-04 01:00 · 3 minutes ago"));
         assert!(html.contains(r#"<h2 class="period-name">2026</h2>"#));
         assert!(html.contains(
             r#"<a href="/sensors?channel=%23greenhouse&amp;range=year&amp;at=2025-12-31" rel="prev">← Earlier</a>"#
@@ -954,6 +1118,7 @@ mod tests {
             &channels,
             Some((&shown, None, false)),
             Some(&graph),
+            &Newest::default(),
         )
         .into_string();
         assert!(hidden.contains("Faulty readings are hidden."));
@@ -975,6 +1140,7 @@ mod tests {
             &channels,
             Some((&june, Some(date(2025, 6, 11)), true)),
             Some(&graph),
+            &Newest::default(),
         )
         .into_string();
         assert!(past.contains(r#"<h2 class="period-name">Week of June 9, 2025</h2>"#));
@@ -1002,16 +1168,80 @@ mod tests {
             &channels,
             Some((&day, Some(date(2025, 6, 11)), true)),
             Some(&graph),
+            &Newest::default(),
         )
         .into_string();
         assert!(!one_day.contains("data-zoom"));
         assert!(one_day.contains(r#"<span aria-current="page">Wednesday, June 11</span>"#));
 
-        let none = page(Site::Review, &[], None, None).into_string();
+        let none = page(Site::Review, &[], None, None, &Newest::default()).into_string();
         assert!(none.contains("No sensor readings yet."));
         assert!(none.contains("sensors analyze"));
-        let live = page(Site::Live, &[], None, None).into_string();
+        let live = page(Site::Live, &[], None, None, &Newest::default()).into_string();
         assert!(live.contains("within seconds") && !live.contains("Analyze"));
+    }
+
+    #[test]
+    fn says_how_long_ago() {
+        let now = 1_793_840_797_796;
+        assert_eq!(ago(now, now - 59_000), "just now");
+        assert_eq!(ago(now, now + 5_000), "just now");
+        assert_eq!(ago(now, now - graphs::MINUTE), "1 minute ago");
+        assert_eq!(ago(now, now - 59 * graphs::MINUTE), "59 minutes ago");
+        assert_eq!(ago(now, now - HOUR), "1 hour ago");
+        assert_eq!(ago(now, now - 47 * HOUR), "47 hours ago");
+        assert_eq!(ago(now, now - 72 * HOUR), "3 days ago");
+    }
+
+    #[test]
+    fn finds_each_sensors_newest_readings() {
+        let root = TempDir::new("sensors-newest");
+        let logs = root.0.join("logs");
+        fs::create_dir_all(logs.join("wetfish")).unwrap();
+        // The outside sensor's newest humidity is faulty, and the inside
+        // sensor's newest reading came from a nick after a reconnect.
+        fs::write(
+            logs.join("wetfish/#greenhouse.log"),
+            r#"--- Log opened Wed Nov 04 18:00:10 2026
+18:03 < greenhouse> {"sensor":"outside","temp":"49.46","humid":"58.80","timestamp":"2026-11-05T01:03:07.195Z"}
+18:03 < greenhouse> {"sensor":"inside","temp":"51.44","humid":"49.60","timestamp":"2026-11-05T01:03:07.248Z"}
+18:03 < greenhouse> {"sensor":"outside","temp":"49.50","humid":"58.90","timestamp":"2026-11-05T01:03:37.195Z"}
+18:04 < greenhouse> {"sensor":"outside","temp":"49.55","humid":"302","timestamp":"2026-11-05T01:04:07.195Z"}
+18:04 < greenhouse_> {"sensor":"inside","temp":"51.50","humid":"49.70","timestamp":"2026-11-05T01:04:07.248Z"}
+"#,
+        )
+        .unwrap();
+        let mut conn = db::open(&root.0.join("sensors.sqlite")).unwrap();
+        analysis::run(&mut conn, &[logs], None, false, &mut Progress::quiet()).unwrap();
+        let offsets = Offsets::load(&conn).unwrap();
+
+        let greenhouse = newest(&conn, "#GreenHouse", &offsets, 0).unwrap();
+        let found: Vec<(&str, &str, Vec<(String, f64)>)> = greenhouse
+            .sensors
+            .iter()
+            .map(|s| (s.sensor.as_str(), s.local.as_str(), s.values.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "inside",
+                    "2026-11-04 18:04",
+                    vec![("temp".to_string(), 51.5), ("humid".to_string(), 49.7)]
+                ),
+                (
+                    "outside",
+                    "2026-11-04 18:04",
+                    vec![("temp".to_string(), 49.55), ("humid".to_string(), 58.9)]
+                ),
+            ]
+        );
+        assert!(
+            newest(&conn, "#elsewhere", &offsets, 0)
+                .unwrap()
+                .sensors
+                .is_empty()
+        );
     }
 
     #[test]

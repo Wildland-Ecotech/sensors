@@ -87,6 +87,13 @@ by itself. Fault marks open close-ups as in the review, without links to
 the History. Its footer links to the source code, which the AGPL asks a
 site running it to offer.
 
+Each sensor's newest readings are at the top, with how long ago they were
+taken. A page showing the newest period reloads itself every 30 seconds to
+show new readings, keeping its place on the page. Its script waits while a
+chart is pointed at or has focus, so a tooltip or fault preview is never
+cut short, and while the page is in a hidden tab. Without the script, it
+reloads every 30 seconds regardless. An earlier period never reloads.
+
 `/up` answers `200 OK` while the bot is on IRC and in every one of its
 channels, and `503 Service Unavailable` while it isn't, never cached.
 `sensors health ADDRESS` asks it, for a container's health check, since a

@@ -5,18 +5,36 @@ use maud::{DOCTYPE, Markup, html};
 
 use super::{Flash, Site};
 
+/// How a page reloads itself.
+#[derive(Clone, Copy)]
+enum Reload {
+    Never,
+    /// Every so many seconds, to follow work under way, with no script.
+    Every(u32),
+    /// Every so many seconds, to show new readings. `chart.js` waits while
+    /// a chart is pointed at or has focus, or the page is hidden; without
+    /// the script, it reloads anyway.
+    Follow(u32),
+}
+
 /// A complete page with the site navigation and any notice or error.
 pub fn page(title: &str, flash: &Flash, body: Markup) -> Markup {
-    frame(super::site(), title, flash, body, None)
+    frame(super::site(), title, flash, body, Reload::Never)
 }
 
 /// A page that reloads itself every `seconds`, to follow work under way
 /// with no script.
 pub fn reloading_page(title: &str, flash: &Flash, body: Markup, seconds: u32) -> Markup {
-    frame(super::site(), title, flash, body, Some(seconds))
+    frame(super::site(), title, flash, body, Reload::Every(seconds))
 }
 
-fn frame(site: Site, title: &str, flash: &Flash, body: Markup, reload: Option<u32>) -> Markup {
+/// A page that reloads itself about every `seconds` to show new readings,
+/// unless someone is looking closely at a chart.
+pub fn following_page(title: &str, flash: &Flash, body: Markup, seconds: u32) -> Markup {
+    frame(super::site(), title, flash, body, Reload::Follow(seconds))
+}
+
+fn frame(site: Site, title: &str, flash: &Flash, body: Markup, reload: Reload) -> Markup {
     let name = match site {
         Site::Review => "sensors review",
         Site::Live => "sensors",
@@ -27,14 +45,22 @@ fn frame(site: Site, title: &str, flash: &Flash, body: Markup, reload: Option<u3
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                @if let Some(seconds) = reload {
-                    meta http-equiv="refresh" content=(seconds);
+                @match reload {
+                    Reload::Every(seconds) => {
+                        meta http-equiv="refresh" content=(seconds);
+                    },
+                    Reload::Follow(seconds) => {
+                        noscript {
+                            meta http-equiv="refresh" content=(seconds);
+                        }
+                    },
+                    Reload::Never => {},
                 }
                 title { (title) " · " (name) }
                 link rel="stylesheet" href="/style.css";
                 script src="/chart.js" defer {}
             }
-            body {
+            body data-refresh=[follow_seconds(reload)] {
                 header {
                     nav {
                         a.brand href="/" { (name) }
@@ -72,6 +98,15 @@ fn frame(site: Site, title: &str, flash: &Flash, body: Markup, reload: Option<u3
                 }
             }
         }
+    }
+}
+
+/// The seconds between reloads for `chart.js`, on a page following new
+/// readings.
+fn follow_seconds(reload: Reload) -> Option<u32> {
+    match reload {
+        Reload::Follow(seconds) => Some(seconds),
+        _ => None,
     }
 }
 
@@ -138,7 +173,14 @@ mod tests {
 
     #[test]
     fn shows_only_the_sensors_on_the_live_site() {
-        let live = frame(Site::Live, "Sensors", &Flash::default(), html! {}, None).into_string();
+        let live = frame(
+            Site::Live,
+            "Sensors",
+            &Flash::default(),
+            html! {},
+            Reload::Never,
+        )
+        .into_string();
         assert!(live.contains("<title>Sensors · sensors</title>"));
         assert!(live.contains(r#"<a class="brand" href="/">sensors</a></nav>"#));
         assert!(!live.contains("/history") && !live.contains("/analyze"));
@@ -147,5 +189,20 @@ mod tests {
                 r#"<a href="https://github.com/Wildland-Ecotech/sensors">Source code</a>"#
             )
         );
+        assert!(live.contains("<body>"));
+    }
+
+    #[test]
+    fn reloads_to_follow_work_or_new_readings() {
+        let flash = Flash::default();
+        let every = frame(Site::Review, "x", &flash, html! {}, Reload::Every(2)).into_string();
+        assert!(every.contains(r#"<meta http-equiv="refresh" content="2">"#));
+        assert!(!every.contains("noscript") && !every.contains("data-refresh"));
+
+        let follow = frame(Site::Live, "x", &flash, html! {}, Reload::Follow(30)).into_string();
+        assert!(
+            follow.contains(r#"<noscript><meta http-equiv="refresh" content="30"></noscript>"#)
+        );
+        assert!(follow.contains(r#"<body data-refresh="30">"#));
     }
 }

@@ -9,6 +9,10 @@
 // chart as a dashed red line through their values, from the line's point
 // before them to the one after, stretching the chart's scale while it shows
 // when they lie off it.
+//
+// A page with data-refresh on its body, the live site's newest period,
+// reloads itself every so many seconds to show new readings, but waits
+// while a chart is pointed at or has focus, or the page is hidden.
 (function () {
     "use strict";
 
@@ -379,4 +383,15 @@
     }
 
     document.querySelectorAll("figure.chart[data-points]").forEach(setUp);
+
+    var refresh = Number(document.body.dataset.refresh);
+    if (refresh > 0) {
+        var due = Date.now() + refresh * 1000;
+        window.setInterval(function () {
+            var busy = document.hidden || document.querySelector(".plot:hover, .plot:focus-within");
+            if (Date.now() >= due && !busy) {
+                window.location.reload();
+            }
+        }, 1000);
+    }
 })();

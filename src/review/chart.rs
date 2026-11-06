@@ -64,7 +64,13 @@ impl Options<'_> {
 /// A sensor's color slot, from 1, kept across measures and ranges; 0, gray,
 /// past the eighth sensor.
 pub fn slot(graph: &Graph, sensor: &str) -> usize {
-    match graph.sensors.iter().position(|known| known == sensor) {
+    slot_among(&graph.sensors, sensor)
+}
+
+/// A sensor's color slot among a channel's sensors, sorted, as a graph
+/// lists them.
+pub fn slot_among(sensors: &[String], sensor: &str) -> usize {
+    match sensors.iter().position(|known| known == sensor) {
         Some(index) if index < SLOTS => index + 1,
         _ => 0,
     }

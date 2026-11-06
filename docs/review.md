@@ -18,14 +18,16 @@ the charts.
   each sensor's measures with their latest reading, when it was taken, how
   many readings there are, and since when. Times are as the logs show them,
   see [Time zones](readings.md#time-zones). **Analyze now** reads new lines.
-- **Sensors:** a chart of each measure, such as temperature and humidity,
-  with a line for each sensor, see [Graphs](#graphs). Links above the charts
-  show a calendar day, week, month or year, or everything, opening on the
-  one with the newest reading. **Earlier** and **Later** step one period at a
-  time, as far as the readings go, and **Newest** comes back. Click a chart
-  to zoom in, see [Zooming](#zooming). Under each chart, each sensor's last
-  reading in the period, and its lowest, mean and highest. Below them, CSV
-  downloads of the period.
+- **Sensors:** at the top, each sensor's newest readings that are not
+  faulty, when they were taken and how long ago. Then a chart of each
+  measure, such as temperature and humidity, with a line for each sensor,
+  see [Graphs](#graphs). Links above the charts show a calendar day, week,
+  month or year, or everything, opening on the one with the newest reading.
+  **Earlier** and **Later** step one period at a time, as far as the
+  readings go, and **Newest** comes back. Click a chart to zoom in, see
+  [Zooming](#zooming). Under each chart, each sensor's last reading in the
+  period, and its lowest, mean and highest. Below them, CSV downloads of the
+  period.
 - **Close-up:** the two hours around a time, every reading on its own, none
   averaged, opened from a fault mark. Its faulty readings are listed with a
   link to each one's line in the History, and **An hour earlier** and **An
