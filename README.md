@@ -78,7 +78,9 @@ sensors live --time-zone America/Denver
 It joins `#greenhouse` on `irc.wetfish.net` as `sensors`, logs it into
 `live-logs/` as irssi would, and serves the graphs at
 <http://127.0.0.1:7173/>, without the History or Analyze pages. See
-[Live graphs](docs/live.md) for its options and bringing in older logs.
+[Live graphs](docs/live.md) for its options and bringing in older logs. It
+runs at <https://sensors.wildland.eco/>, deployed with Docker on a Wetfish
+server, see [Deploying](docs/deploying.md).
 
 ## Documentation
 
@@ -90,6 +92,8 @@ It joins `#greenhouse` on `irc.wetfish.net` as `sensors`, logs it into
   and how the graphs and downloads work.
 - [Live graphs](docs/live.md): the `sensors live` bot, its logs, and its
   site.
+- [Deploying](docs/deploying.md): running `sensors live` on a Wetfish
+  server with Docker, at `sensors.wildland.eco`.
 - [Database](docs/database.md): the tables, for querying them or working on
   `sensors`.
 

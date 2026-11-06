@@ -5,3 +5,7 @@
 
 # The log folder of sensors live run from here.
 /live-logs
+
+# The settings of sensors live in Docker, which setup.conf fills in on a
+# server. sensors.env.example is tracked instead.
+/sensors.env

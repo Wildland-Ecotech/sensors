@@ -158,6 +158,7 @@ async fn up(State(app): State<App>) -> Response {
 }
 
 /// An error page with an HTTP status.
+#[derive(Debug)]
 struct PageError {
     status: StatusCode,
     message: String,

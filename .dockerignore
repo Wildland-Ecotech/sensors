@@ -1,0 +1,8 @@
+# Only the source goes into the image; settings and data reach the
+# container at run time
+.git
+target
+live-logs
+sensors.sqlite*
+.env
+*.env

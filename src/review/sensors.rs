@@ -1216,24 +1216,24 @@ mod tests {
         let offsets = Offsets::load(&conn).unwrap();
 
         let greenhouse = newest(&conn, "#GreenHouse", &offsets, 0).unwrap();
-        let found: Vec<(&str, &str, Vec<(String, f64)>)> = greenhouse
+        // "sensor time measure value ...", for each sensor.
+        let found: Vec<String> = greenhouse
             .sensors
             .iter()
-            .map(|s| (s.sensor.as_str(), s.local.as_str(), s.values.clone()))
+            .map(|sensor| {
+                let values: Vec<String> = sensor
+                    .values
+                    .iter()
+                    .map(|(measure, value)| format!("{measure} {value}"))
+                    .collect();
+                format!("{} {} {}", sensor.sensor, sensor.local, values.join(" "))
+            })
             .collect();
         assert_eq!(
             found,
             [
-                (
-                    "inside",
-                    "2026-11-04 18:04",
-                    vec![("temp".to_string(), 51.5), ("humid".to_string(), 49.7)]
-                ),
-                (
-                    "outside",
-                    "2026-11-04 18:04",
-                    vec![("temp".to_string(), 49.55), ("humid".to_string(), 58.9)]
-                ),
+                "inside 2026-11-04 18:04 temp 51.5 humid 49.7",
+                "outside 2026-11-04 18:04 temp 49.55 humid 58.9",
             ]
         );
         assert!(

@@ -1,0 +1,30 @@
+# sensors live on a Wetfish server; see docs/deploying.md. Deploys add the
+# shared web network, so the server's Caddy reaches the site at sensors:8080.
+services:
+  sensors:
+    build: .
+    restart: unless-stopped
+    # The time zone and nick, which deploys copy here from the server's
+    # config/sensors/, as setup.conf asks
+    env_file: sensors.env
+    environment:
+      # Where the container keeps its database and logs, and listens for
+      # Caddy. These win over the same settings in sensors.env.
+      SENSORS_DB: /data/sensors.sqlite
+      SENSORS_LOGS: /data/logs
+      SENSORS_LISTEN: 0.0.0.0:8080
+    volumes:
+      # The database and the logs
+      - data:/data
+    healthcheck:
+      # Healthy while the bot is on IRC and in every one of its channels
+      test: ["CMD", "sensors", "health", "127.0.0.1:8080"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      start_interval: 2s
+    # Time to send QUIT and close the logs before Docker stops it for good
+    stop_grace_period: 15s
+
+volumes:
+  data:

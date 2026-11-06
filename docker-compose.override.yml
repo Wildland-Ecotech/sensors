@@ -1,0 +1,7 @@
+# For trying sensors live in Docker on your own computer, with your settings
+# in sensors.env: docker compose up --build. Deploys leave this file out.
+# The live site is then at http://localhost:8080/.
+services:
+  sensors:
+    ports:
+      - "127.0.0.1:8080:8080"

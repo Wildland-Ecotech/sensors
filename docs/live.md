@@ -97,7 +97,8 @@ reloads every 30 seconds regardless. An earlier period never reloads.
 `/up` answers `200 OK` while the bot is on IRC and in every one of its
 channels, and `503 Service Unavailable` while it isn't, never cached.
 `sensors health ADDRESS` asks it, for a container's health check, since a
-small container has no curl:
+small container has no curl. [Deploying](deploying.md) uses it for the
+container's health check:
 
 ```bash
 sensors health 127.0.0.1:8080 && echo up
