@@ -88,4 +88,7 @@ Imported 5,729 new lines: 1 new file, 2 with new lines, 0 replaced, 0 unchanged
 
 `sensors` expects each channel to be logged once. Unlike wot, it does not
 link network tags into networks, read a bouncer's playback, or leave out
-lines logged twice by two clients.
+lines logged twice by two clients, so the History shows such a line twice.
+Readings are the exception: a channel's readings from every network tag
+folder make one series, so a reading two loggers logged, such as an irssi
+and [`sensors live`](live.md), counts once.

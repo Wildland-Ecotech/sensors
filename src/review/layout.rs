@@ -1,22 +1,26 @@
-//! The page frame shared by every review page, and small helpers for links
-//! and numbers.
+//! The page frame shared by every page, and small helpers for links and
+//! numbers.
 
 use maud::{DOCTYPE, Markup, html};
 
-use super::Flash;
+use super::{Flash, Site};
 
 /// A complete page with the site navigation and any notice or error.
 pub fn page(title: &str, flash: &Flash, body: Markup) -> Markup {
-    frame(title, flash, body, None)
+    frame(super::site(), title, flash, body, None)
 }
 
 /// A page that reloads itself every `seconds`, to follow work under way
 /// with no script.
 pub fn reloading_page(title: &str, flash: &Flash, body: Markup, seconds: u32) -> Markup {
-    frame(title, flash, body, Some(seconds))
+    frame(super::site(), title, flash, body, Some(seconds))
 }
 
-fn frame(title: &str, flash: &Flash, body: Markup, reload: Option<u32>) -> Markup {
+fn frame(site: Site, title: &str, flash: &Flash, body: Markup, reload: Option<u32>) -> Markup {
+    let name = match site {
+        Site::Review => "sensors review",
+        Site::Live => "sensors",
+    };
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -26,22 +30,24 @@ fn frame(title: &str, flash: &Flash, body: Markup, reload: Option<u32>) -> Marku
                 @if let Some(seconds) = reload {
                     meta http-equiv="refresh" content=(seconds);
                 }
-                title { (title) " · sensors review" }
+                title { (title) " · " (name) }
                 link rel="stylesheet" href="/style.css";
                 script src="/chart.js" defer {}
             }
             body {
                 header {
                     nav {
-                        a.brand href="/" { "sensors review" }
-                        a href="/" { "Overview" }
-                        a href="/sensors" { "Sensors" }
-                        a href="/history" { "History" }
-                        a href="/analyze" { "Analyze" }
+                        a.brand href="/" { (name) }
+                        @if site == Site::Review {
+                            a href="/" { "Overview" }
+                            a href="/sensors" { "Sensors" }
+                            a href="/history" { "History" }
+                            a href="/analyze" { "Analyze" }
+                        }
                     }
                 }
                 main {
-                    @if super::analyze::running() {
+                    @if site == Site::Review && super::analyze::running() {
                         p.analysis-banner role="status" {
                             "An analysis is running. Pages show the data from before it until it "
                             "finishes. "
@@ -55,6 +61,14 @@ fn frame(title: &str, flash: &Flash, body: Markup, reload: Option<u32>) -> Marku
                         p.flash.error role="alert" { (error) }
                     }
                     (body)
+                }
+                @if site == Site::Live {
+                    // The AGPL asks for the source to be offered to everyone
+                    // using it over a network.
+                    footer {
+                        "Readings as the sensors post them to IRC. "
+                        a href=(env!("CARGO_PKG_REPOSITORY")) { "Source code" }
+                    }
                 }
             }
         }
@@ -119,5 +133,19 @@ mod tests {
         assert!(page.contains("<title>&lt;b&gt; · sensors review</title>"));
         assert!(page.contains("<p>a &lt; b</p>"));
         assert!(page.contains("Saved &lt;ok&gt;"));
+        assert!(page.contains(r#"<a href="/history">History</a>"#));
+    }
+
+    #[test]
+    fn shows_only_the_sensors_on_the_live_site() {
+        let live = frame(Site::Live, "Sensors", &Flash::default(), html! {}, None).into_string();
+        assert!(live.contains("<title>Sensors · sensors</title>"));
+        assert!(live.contains(r#"<a class="brand" href="/">sensors</a></nav>"#));
+        assert!(!live.contains("/history") && !live.contains("/analyze"));
+        assert!(
+            live.contains(
+                r#"<a href="https://github.com/Wildland-Ecotech/sensors">Source code</a>"#
+            )
+        );
     }
 }

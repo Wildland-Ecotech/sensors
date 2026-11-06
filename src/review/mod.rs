@@ -3,6 +3,10 @@
 //! imported, as `sensors analyze` does; a folder never imported needs
 //! `sensors analyze` once.
 //!
+//! `sensors live` serves the same Sensors pages to anyone, and nothing
+//! else: no History, which would show everything said in the channels, and
+//! no Analyze, which it does by itself. See [`Site`].
+//!
 //! Pages are built on the server with maud and use plain HTML forms, so
 //! everything works without JavaScript. The only script is `chart.js`, which
 //! adds hover tooltips to the charts. A form posts to an action, which
@@ -20,26 +24,51 @@ mod pages;
 mod sensors;
 
 use std::fmt::Display;
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::Router;
+use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use maud::Markup;
 use rusqlite::Connection;
 use serde::Deserialize;
+use tokio::net::TcpListener;
 
 use crate::db;
+use crate::live::Status;
 
 const STYLE: &str = include_str!("style.css");
 const CHART_SCRIPT: &str = include_str!("chart.js");
 
+/// Which pages a server shows, and to whom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Site {
+    /// `sensors review`: every page, on this computer only.
+    Review,
+    /// `sensors live`: the Sensors pages only, to anyone.
+    Live,
+}
+
+/// The site this process serves, set once when its server starts. A
+/// process serves one, and pages and errors are built far from the
+/// request, so it is kept here rather than passed down to every one.
+static SITE: OnceLock<Site> = OnceLock::new();
+
+/// The site this process serves: the review until a live site starts.
+fn site() -> Site {
+    SITE.get().copied().unwrap_or(Site::Review)
+}
+
 #[derive(Clone)]
 struct App {
     db: Arc<PathBuf>,
+    /// Whether `sensors live` is in its channels, on the live site.
+    status: Option<Status>,
 }
 
 /// Serves the review pages on 127.0.0.1 until the process is stopped.
@@ -54,8 +83,10 @@ pub fn run(db_path: &Path, port: u16) -> db::Result<()> {
     // Upgrade the database once up front, so pages never have to.
     db::open(db_path)?;
 
+    let _ = SITE.set(Site::Review);
     let app = App {
         db: Arc::new(db_path.to_path_buf()),
+        status: None,
     };
     let router = Router::new()
         .merge(pages::routes())
@@ -82,6 +113,48 @@ pub fn run(db_path: &Path, port: u16) -> db::Result<()> {
         axum::serve(listener, router).await?;
         Ok(())
     })
+}
+
+/// Serves the live site on `listener` until the process is stopped: the
+/// Sensors pages, with the newest period at `/` too, and `/up` for the
+/// health check, answering 200 while `status` says `sensors live` is in its
+/// channels. The database must exist.
+pub async fn serve_live(listener: TcpListener, db_path: PathBuf, status: Status) -> io::Result<()> {
+    let _ = SITE.set(Site::Live);
+    let app = App {
+        db: Arc::new(db_path),
+        status: Some(status),
+    };
+    let router = Router::new()
+        .merge(sensors::live_routes())
+        .route("/up", get(up))
+        .route("/style.css", get(style))
+        .route("/chart.js", get(chart_script))
+        .fallback(not_found)
+        .with_state(app);
+    axum::serve(listener, router).await
+}
+
+/// `/up`: 200 while `sensors live` is in its channels, and 503 while it
+/// isn't, never cached.
+async fn up(State(app): State<App>) -> Response {
+    let (status, text) = if app.status.as_ref().is_some_and(Status::connected) {
+        (StatusCode::OK, "OK\n")
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Not in every channel on IRC\n",
+        )
+    };
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        text,
+    )
+        .into_response()
 }
 
 /// An error page with an HTTP status.
@@ -113,7 +186,11 @@ impl IntoResponse for PageError {
         } else {
             "Error"
         };
-        let page = layout::page(title, &Flash::default(), pages::error(&self.message));
+        let page = layout::page(
+            title,
+            &Flash::default(),
+            pages::error(&self.message, site()),
+        );
         (self.status, page).into_response()
     }
 }
@@ -174,6 +251,23 @@ async fn not_found() -> PageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn answers_the_health_check() {
+        let status = Status::default();
+        let app = App {
+            db: Arc::new(PathBuf::new()),
+            status: Some(status.clone()),
+        };
+        let answer = up(State(app.clone())).await;
+        assert_eq!(answer.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            answer.headers()[header::CACHE_CONTROL].to_str().unwrap(),
+            "no-store"
+        );
+        status.set_connected(true);
+        assert_eq!(up(State(app)).await.status(), StatusCode::OK);
+    }
 
     #[test]
     fn treats_blank_fields_as_missing() {

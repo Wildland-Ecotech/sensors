@@ -29,7 +29,7 @@ to 5 seconds for another one to finish.
 | --- | --- | --- |
 | `files` | log file | `path`, `tag` (its network tag folder), `target`, `kind` (`channel` or `query`), how far it was read |
 | `events` | log line | `file_id`, `line`, `date`, `time`, `kind`, `nick`, `ident`, `host`, `other_nick`, `text`, `detail` |
-| `sensor_series` | measure of a sensor | `id`, `tag`, `channel`, `nick`, `sensor` (`''` when the lines have none), `measure` |
+| `sensor_series` | measure of a sensor | `id`, `tag` (the folder it was first found in; one series holds every tag's readings), `channel`, `nick`, `sensor` (`''` when the lines have none), `measure` |
 | `readings` | reading | `series_id`, `at`, `value` |
 | `reading_hours` | series and hour | `series_id`, `hour`, `readings`, `total` (their sum), `low`, `high` |
 | `reading_markers` | JSON line without readings | `tag`, `channel`, `nick`, `at`, `text` |

@@ -11,9 +11,10 @@ reading from each of its sensors to `#greenhouse` every thirty seconds:
 18:03 < greenhouse> {"sensor":"inside","temp":"51.44","humid":"49.60","timestamp":"2026-11-05T01:03:07.248Z"}
 ```
 
-Everything runs on your own computer. The logs go into a local SQLite
-database, and `sensors review` serves a web interface for them that only
-your computer can open.
+The logs go into a local SQLite database, and `sensors review` serves a web
+interface for them that only your computer can open. `sensors live` is an
+IRC bot that logs the channel itself and serves live graphs to anyone, for
+running on a server.
 
 ## Status
 
@@ -21,6 +22,8 @@ Early development. It imports irssi logs into the database, reads the
 sensor readings in them, flags faulty readings from hardware glitches, and
 shows them in a web interface: charts of each measure over a day, week,
 month, year or everything, with CSV downloads, and the raw log lines by day.
+`sensors live` follows the channel on IRC and graphs readings within
+seconds.
 
 ## Install
 
@@ -63,6 +66,20 @@ sensors review
 Open <http://127.0.0.1:7172/>. **Analyze now** on the Overview reads new
 lines later, so the command line is only needed for the first import.
 
+## Live graphs
+
+To graph readings as they are posted, run the bot, with the time zone your
+logs should be in:
+
+```bash
+sensors live --time-zone America/Denver
+```
+
+It joins `#greenhouse` on `irc.wetfish.net` as `sensors`, logs it into
+`live-logs/` as irssi would, and serves the graphs at
+<http://127.0.0.1:7173/>, without the History or Analyze pages. See
+[Live graphs](docs/live.md) for its options and bringing in older logs.
+
 ## Documentation
 
 - [Logs and importing](docs/logs.md): the log layout `sensors` expects, the
@@ -71,6 +88,8 @@ lines later, so the command line is only needed for the first import.
   faulty readings, time zones and rebuilding.
 - [Reviewing in a browser](docs/review.md): the pages of `sensors review`,
   and how the graphs and downloads work.
+- [Live graphs](docs/live.md): the `sensors live` bot, its logs, and its
+  site.
 - [Database](docs/database.md): the tables, for querying them or working on
   `sensors`.
 
@@ -78,7 +97,8 @@ lines later, so the command line is only needed for the first import.
 
 The log importer and the review server come from
 [wot](https://github.com/wetfish/web-of-trust), the web of trust tools for
-IRC communities by Wetfish.
+IRC communities by Wetfish, and the IRC connection of `sensors live` from
+[lurker](https://github.com/wetfish/lurkers), Wetfish's bot for idle users.
 
 ## License
 

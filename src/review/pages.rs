@@ -6,7 +6,7 @@ use axum::routing::get;
 use maud::{Markup, html};
 
 use super::layout::{self, number};
-use super::{App, Flash, PageResult, internal, with_db};
+use super::{App, Flash, PageResult, Site, internal, with_db};
 use crate::readings::{self, Offsets, Series};
 use crate::stats::{self, Overview};
 
@@ -28,11 +28,18 @@ async fn overview_page(State(app): State<App>, Query(flash): Query<Flash>) -> Pa
     .await
 }
 
-pub fn error(message: &str) -> Markup {
+pub fn error(message: &str, site: Site) -> Markup {
     html! {
         h1 { "Something went wrong" }
         p { (message) }
-        p { a href="/" { "Back to the overview" } }
+        p {
+            a href="/" {
+                @match site {
+                    Site::Review => "Back to the overview",
+                    Site::Live => "Back to the newest readings",
+                }
+            }
+        }
     }
 }
 

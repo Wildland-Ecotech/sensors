@@ -99,8 +99,7 @@ impl Progress {
         progress
     }
 
-    /// Reports nothing, for tests.
-    #[cfg(test)]
+    /// Reports nothing, for `sensors live` once it has started, and tests.
     pub fn quiet() -> Self {
         Progress {
             enabled: false,

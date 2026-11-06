@@ -2,3 +2,6 @@
 
 # The default database, and SQLite's temporary files next to it.
 /sensors.sqlite*
+
+# The log folder of sensors live run from here.
+/live-logs

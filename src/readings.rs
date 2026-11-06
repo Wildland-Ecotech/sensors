@@ -287,8 +287,11 @@ pub fn build_with_progress(
     Ok(summary)
 }
 
-/// The key of a series: tag, channel, nick, sensor and measure.
-type SeriesKey = (String, String, String, String, String);
+/// The key of a series: channel, nick, sensor and measure. Not the network
+/// tag, so lines logged in two places, such as by irssi and by `sensors
+/// live`, give one series, and a reading both logged counts once, as a
+/// repeat. The series keeps the tag it was first found in.
+type SeriesKey = (String, String, String, String);
 
 /// State while readings are built.
 struct Builder {
@@ -311,24 +314,24 @@ struct Builder {
 impl Builder {
     fn load(tx: &Transaction<'_>) -> Result<Builder> {
         let mut stmt =
-            tx.prepare("SELECT id, tag, channel, nick, sensor, measure FROM sensor_series")?;
-        let series: HashMap<SeriesKey, i64> = stmt
+            tx.prepare("SELECT id, channel, nick, sensor, measure FROM sensor_series ORDER BY id")?;
+        let rows = stmt
             .query_map([], |row| {
                 Ok((
-                    (
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ),
+                    (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?),
                     row.get(0)?,
                 ))
             })?
-            .collect::<rusqlite::Result<_>>()?;
+            .collect::<rusqlite::Result<Vec<(SeriesKey, i64)>>>()?;
+        // The oldest, should a database from before series left tags out
+        // have one in several tags. Rebuilding merges them.
+        let mut series: HashMap<SeriesKey, i64> = HashMap::new();
+        for (key, id) in rows {
+            series.entry(key).or_insert(id);
+        }
         let measures = series
             .iter()
-            .map(|(key, &id)| (id, key.4.clone()))
+            .map(|(key, &id)| (id, key.3.clone()))
             .collect();
         Ok(Builder {
             series,
@@ -415,14 +418,8 @@ impl Builder {
                     values,
                 } => {
                     for (measure, value) in values {
-                        let key = (
-                            tag.clone(),
-                            channel.clone(),
-                            nick.clone(),
-                            sensor.clone(),
-                            measure,
-                        );
-                        let series = self.series_id(tx, key)?;
+                        let key = (channel.clone(), nick.clone(), sensor.clone(), measure);
+                        let series = self.series_id(tx, &tag, key)?;
                         if insert_reading.execute(params![series, at, value])? == 1 {
                             self.summary.readings += 1;
                             self.touched.insert((series, at.div_euclid(HOUR)));
@@ -453,18 +450,18 @@ impl Builder {
         Ok(())
     }
 
-    /// The id of a series, adding it when it is new.
-    fn series_id(&mut self, tx: &Transaction<'_>, key: SeriesKey) -> Result<i64> {
+    /// The id of a series, adding it in `tag` when it is new.
+    fn series_id(&mut self, tx: &Transaction<'_>, tag: &str, key: SeriesKey) -> Result<i64> {
         if let Some(&id) = self.series.get(&key) {
             return Ok(id);
         }
         tx.execute(
             "INSERT INTO sensor_series (tag, channel, nick, sensor, measure)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![key.0, key.1, key.2, key.3, key.4],
+            params![tag, key.0, key.1, key.2, key.3],
         )?;
         let id = tx.last_insert_rowid();
-        self.measures.insert(id, key.4.clone());
+        self.measures.insert(id, key.3.clone());
         self.series.insert(key, id);
         Ok(id)
     }
@@ -813,6 +810,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(days, ("#greenhouse".into(), "2026-11-03".into(), 7));
+    }
+
+    #[test]
+    fn counts_a_reading_logged_in_two_places_once() {
+        // The same lines logged by irssi, and by sensors live.
+        let (root, mut conn) = setup("readings-two-logs");
+        fs::create_dir_all(root.0.join("irssi")).unwrap();
+        fs::write(root.0.join("irssi/#greenhouse.log"), LOG).unwrap();
+        import(&root, &mut conn);
+        let summary = build(&mut conn, false).unwrap();
+        assert_eq!((summary.readings, summary.repeated), (8, 8));
+        assert_eq!(
+            hours(&conn),
+            [
+                "inside humid 2 35.50 35.5 35.5",
+                "inside temp 2 68.54 68.54 68.54",
+                "outside humid 2 45.90 45.8 46.0",
+                "outside temp 2 65.39 65.3 65.48",
+            ]
+        );
+        assert_eq!(series(&conn).unwrap().len(), 4);
     }
 
     #[test]

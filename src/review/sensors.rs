@@ -8,7 +8,11 @@
 //! Charts zoom in a step at a time, from everything to a year, a month, a
 //! week and a day, and breadcrumbs zoom back out. A fault mark opens a
 //! close-up: the two hours around it, every reading on its own, with its
-//! faulty readings listed and linked to their lines in the history.
+//! faulty readings listed and, in the review, linked to their lines in the
+//! history.
+//!
+//! The live site serves these pages and nothing else, with the newest
+//! period at `/` too.
 
 use axum::Router;
 use axum::extract::{Query, State};
@@ -21,7 +25,7 @@ use serde::Deserialize;
 
 use super::chart::{self, Options, measure_name, sensor_name, slot};
 use super::layout::{self, number, url_encode};
-use super::{App, Flash, PageError, PageResult, filled, internal, with_db};
+use super::{App, Flash, PageError, PageResult, Site, filled, internal, site, with_db};
 use crate::faults::Reason;
 use crate::graphs::{
     self, CLOSE_UP_SIDE, Graph, Measure, Period, Range, date_of, decimal, time_text,
@@ -33,6 +37,11 @@ pub(super) fn routes() -> Router<App> {
         .route("/sensors", get(sensors_page))
         .route("/sensors.csv", get(download))
         .route("/sensors/close-up", get(close_up_page))
+}
+
+/// The live site's pages: these, and the newest period at `/`.
+pub(super) fn live_routes() -> Router<App> {
+    routes().route("/", get(sensors_page))
 }
 
 /// The range one step in from another, or `None` from a day.
@@ -265,7 +274,11 @@ async fn sensors_page(
         let channels = graphs::channels(conn).map_err(internal)?;
         let offsets = Offsets::load(conn).map_err(internal)?;
         let Some(shown) = shown(conn, &query, &offsets)? else {
-            return Ok(layout::page("Sensors", &flash, page(&channels, None, None)));
+            return Ok(layout::page(
+                "Sensors",
+                &flash,
+                page(site(), &channels, None, None),
+            ));
         };
         let graph =
             Graph::build(conn, &shown.channel, &shown.period, &offsets, None).map_err(internal)?;
@@ -274,6 +287,7 @@ async fn sensors_page(
             &title,
             &flash,
             page(
+                site(),
                 &channels,
                 Some((&shown, query.at(), query.faults())),
                 graph.as_ref(),
@@ -286,6 +300,7 @@ async fn sensors_page(
 /// The page for a period: what is shown, the date the address asked for, if
 /// any, and whether faulty readings are flagged.
 fn page(
+    site: Site,
     channels: &[String],
     shown: Option<(&Shown, Option<NaiveDate>, bool)>,
     graph: Option<&Graph>,
@@ -293,9 +308,15 @@ fn page(
     let Some((shown, at, faults)) = shown else {
         return html! {
             h1 { "Sensors" }
-            p {
-                "No sensor readings yet. Run " code { "sensors analyze" }
-                " or Analyze now to import some."
+            @match site {
+                Site::Review => p {
+                    "No sensor readings yet. Run " code { "sensors analyze" }
+                    " or Analyze now to import some."
+                },
+                Site::Live => p {
+                    "No sensor readings yet. They show here within seconds of a sensor posting "
+                    "one."
+                },
             }
         };
     };
@@ -541,14 +562,18 @@ async fn close_up_page(
             .map_err(internal)?
             .ok_or_else(|| PageError::not_found("There are no sensor readings yet."))?;
         let title = format!("Close-up of {} in {}", time_text(at, true), shown.channel);
-        Ok(layout::page(&title, &flash, close_up(&shown, at, &graph)))
+        Ok(layout::page(
+            &title,
+            &flash,
+            close_up(site(), &shown, at, &graph),
+        ))
     })
     .await
 }
 
 /// The two hours around a time, every reading on its own, and the faulty
-/// readings in them.
-fn close_up(shown: &Shown, at: i64, graph: &Graph) -> Markup {
+/// readings in them, linked to their lines in the review's history.
+fn close_up(site: Site, shown: &Shown, at: i64, graph: &Graph) -> Markup {
     let channel = shown.channel.as_str();
     let view = View {
         channel,
@@ -617,7 +642,9 @@ fn close_up(shown: &Shown, at: i64, graph: &Graph) -> Markup {
                             th { "Measure" }
                             th.num { "Value" }
                             th { "Why" }
-                            th { "Line" }
+                            @if site == Site::Review {
+                                th { "Line" }
+                            }
                         }
                     }
                     tbody {
@@ -628,15 +655,19 @@ fn close_up(shown: &Shown, at: i64, graph: &Graph) -> Markup {
                                 td { (measure_name(measure).0) }
                                 td.num { (decimal(fault.value)) }
                                 td { (Reason::describe(&fault.reason)) }
-                                td { a href=(history_href(channel, fault)) { "In the history" } }
+                                @if site == Site::Review {
+                                    td { a href=(history_href(channel, fault)) { "In the history" } }
+                                }
                             }
                         }
                     }
                 }
             }
-            p.note {
-                "Each line links to the history of its day, showing the log line it came "
-                "from, to read with the lines around it."
+            @if site == Site::Review {
+                p.note {
+                    "Each line links to the history of its day, showing the log line it came "
+                    "from, to read with the lines around it."
+                }
             }
         }
     }
@@ -866,7 +897,13 @@ mod tests {
             first: first_reading,
             last: last_reading,
         };
-        let html = page(&channels, Some((&shown, None, true)), Some(&graph)).into_string();
+        let html = page(
+            Site::Review,
+            &channels,
+            Some((&shown, None, true)),
+            Some(&graph),
+        )
+        .into_string();
         assert!(html.contains(r#"<h2 class="period-name">2026</h2>"#));
         assert!(html.contains(
             r#"<a href="/sensors?channel=%23greenhouse&amp;range=year&amp;at=2025-12-31" rel="prev">← Earlier</a>"#
@@ -912,7 +949,13 @@ mod tests {
             r#"href="/sensors/close-up?channel=%23greenhouse&amp;at=2026-11-04T00:00:00""#
         ));
 
-        let hidden = page(&channels, Some((&shown, None, false)), Some(&graph)).into_string();
+        let hidden = page(
+            Site::Review,
+            &channels,
+            Some((&shown, None, false)),
+            Some(&graph),
+        )
+        .into_string();
         assert!(hidden.contains("Faulty readings are hidden."));
         assert!(hidden.contains(
             r#"<a href="/sensors?channel=%23greenhouse&amp;range=day&amp;faults=hide">Day</a>"#
@@ -928,6 +971,7 @@ mod tests {
             ..shown
         };
         let past = page(
+            Site::Review,
             &channels,
             Some((&june, Some(date(2025, 6, 11)), true)),
             Some(&graph),
@@ -954,6 +998,7 @@ mod tests {
             ..june
         };
         let one_day = page(
+            Site::Review,
             &channels,
             Some((&day, Some(date(2025, 6, 11)), true)),
             Some(&graph),
@@ -962,8 +1007,11 @@ mod tests {
         assert!(!one_day.contains("data-zoom"));
         assert!(one_day.contains(r#"<span aria-current="page">Wednesday, June 11</span>"#));
 
-        let none = page(&[], None, None).into_string();
+        let none = page(Site::Review, &[], None, None).into_string();
         assert!(none.contains("No sensor readings yet."));
+        assert!(none.contains("sensors analyze"));
+        let live = page(Site::Live, &[], None, None).into_string();
+        assert!(live.contains("within seconds") && !live.contains("Analyze"));
     }
 
     #[test]
@@ -1004,7 +1052,7 @@ mod tests {
             first: 0,
             last: at + HOUR,
         };
-        let html = close_up(&shown, at, &close_up_graph).into_string();
+        let html = close_up(Site::Review, &shown, at, &close_up_graph).into_string();
         assert!(html.contains(
             r#"<h2 class="period-name">Close-up of 00:00:00 on Wednesday, November 4, 2026</h2>"#
         ));
@@ -1022,13 +1070,17 @@ mod tests {
         assert!(html.contains(
             r#"href="/history?day=2026-11-04&amp;channel=%23greenhouse&amp;q=2026-11-04T07%3A00%3A00.000Z""#
         ));
+        // The live site has no history to link to.
+        let live = close_up(Site::Live, &shown, at, &close_up_graph).into_string();
+        assert!(live.contains("<td>spike</td></tr>"));
+        assert!(!live.contains("/history") && !live.contains("<th>Line</th>"));
 
         let quiet = Graph {
             measures: vec![],
             ..close_up_graph
         };
         assert!(
-            close_up(&shown, at, &quiet)
+            close_up(Site::Review, &shown, at, &quiet)
                 .into_string()
                 .contains("No faulty readings in these two hours.")
         );
